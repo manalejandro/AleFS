@@ -1,0 +1,24 @@
+#!/bin/sh
+set -e
+
+MODULE_VERSION="@VERSION@"
+MODULE_NAME="alefs"
+
+if [ -d /usr/src/${MODULE_NAME}-${MODULE_VERSION} ]; then
+    rm -rf /usr/src/${MODULE_NAME}-${MODULE_VERSION}
+fi
+mkdir -p /usr/src/${MODULE_NAME}-${MODULE_VERSION}
+cp -r /usr/share/doc/${MODULE_NAME}/dkms/* /usr/src/${MODULE_NAME}-${MODULE_VERSION}/
+
+if command -v dkms >/dev/null 2>&1; then
+    dkms add -m ${MODULE_NAME} -v ${MODULE_VERSION} 2>/dev/null || true
+    dkms build -m ${MODULE_NAME} -v ${MODULE_VERSION} || { echo "ALEFS WARNING: dkms build failed — see /var/lib/dkms/${MODULE_NAME}/${MODULE_VERSION}/build/make.log"; exit 0; }
+    dkms install -m ${MODULE_NAME} -v ${MODULE_VERSION} || echo "ALEFS WARNING: dkms install failed"
+elif [ -d /lib/modules/$(uname -r)/build ]; then
+    echo "DKMS not found, building module directly..."
+    cd /usr/src/${MODULE_NAME}-${MODULE_VERSION}
+    make -C /lib/modules/$(uname -r)/build M=/usr/src/${MODULE_NAME}-${MODULE_VERSION} modules || true
+fi
+
+depmod -a 2>/dev/null || true
+exit 0

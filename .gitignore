@@ -1,0 +1,11 @@
+*.o
+*.ko
+*.exe
+*.deb
+*.tar.gz
+build/
+pkg/
+alefs
+mkfs.alefs
+mount.alefs
+core.*

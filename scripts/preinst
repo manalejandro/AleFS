@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+
+# Remove old DKMS module if upgrading
+MODULE_VERSION="@VERSION@"
+MODULE_NAME="alefs"
+
+if command -v dkms >/dev/null 2>&1; then
+    dkms remove -m ${MODULE_NAME} -v ${MODULE_VERSION} --all 2>/dev/null || true
+fi
+
+exit 0
