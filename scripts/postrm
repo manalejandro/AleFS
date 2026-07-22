@@ -4,6 +4,11 @@ set -e
 MODULE_VERSION="@VERSION@"
 MODULE_NAME="alefs"
 
+if [ "${1}" = "remove" ] || [ "${1}" = "purge" ]; then
+    # Unload kernel module if loaded
+    modprobe -r ${MODULE_NAME}_ko 2>/dev/null || true
+fi
+
 if command -v dkms >/dev/null 2>&1; then
     dkms remove -m ${MODULE_NAME} -v ${MODULE_VERSION} --all 2>/dev/null || true
 fi

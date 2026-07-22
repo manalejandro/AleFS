@@ -62,6 +62,7 @@ KMOD_OBJ  = $(KMOD_DIR)/alefs.ko
 
 all: $(BUILDDIR) $(TARGET)
 	@ln -sf $(TARGET) mkfs.alefs 2>/dev/null || true
+	@ln -sf $(TARGET) mount.alefs 2>/dev/null || true
 
 $(BUILDDIR):
 	mkdir -p $(BUILDDIR)
@@ -156,11 +157,13 @@ testv: $(TARGET)
 
 # Install
 install: $(TARGET)
-	install -d $(DESTDIR)$(PREFIX)/bin
+	install -d $(DESTDIR)/sbin $(DESTDIR)$(PREFIX)/bin
 	install -m 755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/
 	ln -sf $(TARGET) $(DESTDIR)$(PREFIX)/bin/mkfs.alefs 2>/dev/null || true
+	ln -sf $(PREFIX)/bin/$(TARGET) $(DESTDIR)/sbin/mount.alefs 2>/dev/null || true
 	@echo "AleFS installed to $(DESTDIR)$(PREFIX)/bin/$(TARGET)"
 	@echo "  mkfs.alefs -> alefs (symlink)"
+	@echo "  mount.alefs -> alefs (symlink)"
 	@if [ -f $(KMOD_OBJ) ]; then \
 		install -d $(DESTDIR)$(PREFIX)/lib/modules/$(KVER)/extra; \
 		install -m 644 $(KMOD_OBJ) $(DESTDIR)$(PREFIX)/lib/modules/$(KVER)/extra/; \
@@ -170,6 +173,7 @@ install: $(TARGET)
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/$(TARGET)
 	rm -f $(DESTDIR)$(PREFIX)/bin/mkfs.alefs
+	rm -f $(DESTDIR)/sbin/mount.alefs
 
 format:
 	@if command -v clang-format >/dev/null 2>&1; then \
@@ -180,7 +184,7 @@ format:
 
 clean:
 	rm -rf $(BUILDDIR) $(TARGET)
-	rm -f mkfs.alefs
+	rm -f mkfs.alefs mount.alefs
 	rm -f /tmp/alefs-test-*.bin
 	$(MAKE) -C $(KDIR) M=$(PWD)/build/kmod clean 2>/dev/null || true
 
@@ -196,15 +200,19 @@ deb: $(TARGET)
 	         pkg/deb/usr/src \
 	         pkg/deb/usr/share/doc/alefs/dkms \
 	         pkg/deb/usr/share/man/man1 \
-	         pkg/deb/usr/share/man/man8
+	         pkg/deb/usr/share/man/man8 \
+	         pkg/deb/lib/udev/rules.d
 	# Binary and symlinks
 	cp $(TARGET) pkg/deb/usr/bin/alefs
 	ln -sf alefs pkg/deb/usr/bin/mkfs.alefs
+	ln -sf /usr/bin/alefs pkg/deb/usr/sbin/mount.alefs
 	# Documentation
 	cp README.md LICENSE pkg/deb/usr/share/doc/alefs/
 	echo "AleFS $(VERSION) changelog" | gzip -9nf > pkg/deb/usr/share/doc/alefs/changelog.gz
 	chmod 644 pkg/deb/usr/share/doc/alefs/*.md
 	chmod 644 pkg/deb/usr/share/doc/alefs/LICENSE 2>/dev/null || true
+	# udev rule for auto-mount
+	cp scripts/90-alefs.rules pkg/deb/lib/udev/rules.d/
 	# DKMS sources (kernel module builds on target system)
 	cp src/alefs_ko.c pkg/deb/usr/share/doc/alefs/dkms/
 	cp src/alefs_layout.h pkg/deb/usr/share/doc/alefs/dkms/

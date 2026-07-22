@@ -102,6 +102,12 @@ struct alefs_dirent {
     char     name[];
 } __attribute__((packed));
 
+struct alefs_direntry {
+    uint64_t ino;
+    uint8_t  name_len;
+    uint8_t  name[];
+} __attribute__((packed));
+
 struct alefs_btree_node {
     uint64_t parent;
     uint64_t next;

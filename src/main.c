@@ -7,7 +7,9 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/mount.h>
 #include <time.h>
+#include <stdint.h>
 
 static void print_usage(void)
 {
@@ -28,6 +30,7 @@ static void print_usage(void)
     printf("  alefs mkfs <device> [size_mb]\n");
     printf("\nSymlink invocation:\n");
     printf("  mkfs.alefs <device> [size_mb]\n");
+    printf("  mount.alefs <device> <mountpoint>\n");
 }
 
 static int cmd_format(int argc, char **argv)
@@ -103,8 +106,19 @@ static int cmd_mkfs(int argc, char **argv)
 
     if (size_mb == 0) {
         struct stat st;
-        if (stat(device, &st) == 0 && S_ISREG(st.st_mode))
-            size_mb = st.st_size / (1024 * 1024);
+        if (stat(device, &st) == 0) {
+            if (S_ISREG(st.st_mode))
+                size_mb = st.st_size / (1024 * 1024);
+            else if (S_ISBLK(st.st_mode)) {
+                int fd = open(device, O_RDONLY);
+                if (fd >= 0) {
+                    off_t sz = lseek(fd, 0, SEEK_END);
+                    if (sz > 0)
+                        size_mb = (uint64_t)sz / (1024 * 1024);
+                    close(fd);
+                }
+            }
+        }
         if (size_mb == 0)
             size_mb = 64;
     }
@@ -161,45 +175,72 @@ static int cmd_mount(int argc, char **argv)
     return 1;
 }
 
-/* mount.alefs helper: invoked by mount -t alefs */
+/* mount.alefs helper: invoked by mount -t alefs or udev
+ * Modes:
+ *   mount.alefs --probe <device>   — check AleFS magic, return udev env
+ *   mount.alefs <device> [mnt]      — mount AleFS filesystem
+ */
 static int run_mount_alefs(int argc, char **argv)
 {
-    if (argc < 3) {
-        fprintf(stderr, "Usage: mount.alefs <device> <mountpoint> [-o options]\n");
-        fprintf(stderr, "Called by mount(8) for 'mount -t alefs ...'\n");
-        fprintf(stderr, "Requires the alefs kernel module: modprobe alefs\n");
+    if (argc < 2) {
+        fprintf(stderr, "Usage: mount.alefs [--probe] <device> [mountpoint]\n");
         return 1;
     }
 
-    const char *device = argv[1];
-    const char *mnt    = argv[2];
-    (void)device;
-    (void)mnt;
+    int probe_mode = 0;
+    int arg_idx = 1;
 
-    if (access(device, F_OK) != 0) {
-        fprintf(stderr, "mount.alefs: %s: not found\n", device);
-        return 1;
-    }
-    if (access(mnt, F_OK) != 0) {
-        fprintf(stderr, "mount.alefs: %s: mount point not found\n", mnt);
-        return 1;
+    if (strcmp(argv[1], "--probe") == 0) {
+        probe_mode = 1;
+        arg_idx = 2;
+        if (argc < 3) return 1;
     }
 
-    /* build mount syscall arguments */
-    /* mount -t alefs <device> <mountpoint> */
-    pid_t pid = fork();
-    if (pid == 0) {
-        execlp("mount", "mount", "-t", "alefs", device, mnt, NULL);
-        _exit(1);
-    }
-    int status;
-    waitpid(pid, &status, 0);
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+    const char *device = argv[arg_idx];
+
+    if (probe_mode) {
+        uint64_t magic = 0;
+        int fd = open(device, O_RDONLY);
+        if (fd < 0) return 1;
+        if (read(fd, &magic, sizeof(magic)) != sizeof(magic)) {
+            close(fd);
+            return 1;
+        }
+        close(fd);
+        if (magic != ALEFS_MAGIC)
+            return 1;
+        printf("ID_FS_TYPE=alefs\n");
         return 0;
+    }
 
-    fprintf(stderr, "mount.alefs: failed. Is the alefs kernel module loaded?\n");
-    fprintf(stderr, "  Run: sudo insmod <path>/alefs.ko\n");
-    return 1;
+    const char *mnt;
+
+    if (argc > arg_idx + 1) {
+        mnt = argv[arg_idx + 1];
+    } else {
+        static char auto_mnt[256];
+        const char *base = strrchr(device, '/');
+        if (!base) base = device; else base++;
+        snprintf(auto_mnt, sizeof(auto_mnt), "/media/%s", base);
+        if (mkdir(auto_mnt, 0755) != 0 && errno != EEXIST) {
+            fprintf(stderr, "mount.alefs: cannot create %s: %s\n",
+                    auto_mnt, strerror(errno));
+            return 1;
+        }
+        mnt = auto_mnt;
+    }
+
+    system("modprobe alefs 2>/dev/null");
+
+    unsigned long flags = 0;
+    int ret = mount(device, mnt, "alefs", flags, NULL);
+    if (ret < 0) {
+        fprintf(stderr, "mount.alefs: mount %s on %s failed: %s\n",
+                device, mnt, strerror(errno));
+        return 1;
+    }
+    printf("mount.alefs: %s mounted on %s\n", device, mnt);
+    return 0;
 }
 
 static int cmd_mkdir(int argc, char **argv)

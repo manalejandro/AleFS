@@ -20,6 +20,7 @@
 #define ALEFS_JOURNAL_BLOCKS  16
 #define ALEFS_BITMAP_BLOCKS   4
 #define ALEFS_INODE_BLOCKS    64
+#define ALEFS_BTREE_ORDER     253
 
 struct alefs_superblock {
     uint64_t magic;
@@ -76,5 +77,19 @@ struct alefs_btree_entry {
     uint64_t key;
     uint64_t value;
 };
+
+/* Directory data block entries.
+ * Stored in data blocks pointed to by the directory inode's extents.
+ * Packed sequentially; no padding between entries.
+ * An entry with name_len == 0 marks end-of-entries in a block.
+ */
+struct alefs_direntry {
+    uint64_t ino;
+    uint8_t  name_len;
+    uint8_t  name[];
+} ALEFS_ATTR;
+
+#define ALEFS_DIR_ENTRY_MIN (sizeof(struct alefs_direntry))  /* 9 */
+#define ALEFS_DIR_ENTRY_MAX (ALEFS_DIR_ENTRY_MIN + ALEFS_MAX_NAME)  /* 264 */
 
 #endif

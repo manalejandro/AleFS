@@ -21,4 +21,8 @@ elif [ -d /lib/modules/$(uname -r)/build ]; then
 fi
 
 depmod -a 2>/dev/null || true
+echo "ALEFS: loading kernel module..."
+modprobe ${MODULE_NAME}_ko || echo "ALEFS WARNING: modprobe ${MODULE_NAME}_ko failed"
+udevadm control --reload-rules 2>/dev/null || true
+echo "ALEFS: install complete"
 exit 0

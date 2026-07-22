@@ -14,6 +14,8 @@ fallos.
 - **Módulo de Kernel Nativo** — Integración directa con VFS, sin FUSE
 - **Herramienta de Usuario** — Formatear, inspeccionar y manipular imágenes sin
   necesidad de montar
+- **Tipos de archivo soportados** — Solo archivos regulares y directorios
+  (sin symlinks, nodos de dispositivo, FIFOs ni sockets)
 
 ## Inicio Rápido
 

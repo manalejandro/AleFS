@@ -59,6 +59,14 @@ int alefs_dev_sync(struct alefs_dev *dev)
 
 int alefs_dev_create(const char *path, uint64_t size_mb)
 {
+    struct stat st;
+    if (stat(path, &st) == 0 && S_ISBLK(st.st_mode)) {
+        int fd = open(path, O_RDWR);
+        if (fd < 0)
+            return -errno;
+        close(fd);
+        return 0;
+    }
     uint64_t size = size_mb * 1024ULL * 1024ULL;
     int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
     if (fd < 0)

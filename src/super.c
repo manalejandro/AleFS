@@ -23,9 +23,16 @@ int alefs_super_format(struct alefs_dev *dev, uint64_t total_blocks)
     sb->data_start      = sb->bitmap_start + ALEFS_BITMAP_BLOCKS;
 
     dev->num_blocks = total_blocks;
+    sb->free_blocks = total_blocks - sb->data_start;
 
     int ret = alefs_dev_write(dev, 0, sb);
     if (ret) return ret;
+
+    uint8_t zero_buf[ALEFS_BLOCK_SIZE] = {0};
+    for (uint64_t b = sb->journal_start; b < sb->bitmap_start; b++) {
+        ret = alefs_dev_write(dev, b, zero_buf);
+        if (ret) return ret;
+    }
 
     ret = alefs_bitmap_init(dev);
     if (ret) return ret;
@@ -52,10 +59,6 @@ int alefs_super_format(struct alefs_dev *dev, uint64_t total_blocks)
     if (ret) return ret;
 
     sb->root_inode = root_ino;
-    sb->free_blocks = sb->data_start;
-    for (uint64_t b = 0; b < sb->data_start; b++)
-        if (!alefs_bitmap_get(dev, b))
-            sb->free_blocks++;
 
     dev->dirty = true;
     return alefs_super_sync(dev);

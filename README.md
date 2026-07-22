@@ -12,6 +12,7 @@ and includes a journal for crash recovery.
 - **Journaling** — Crash recovery support
 - **Native Kernel Module** — Direct VFS integration, no FUSE
 - **Userspace Tool** — Format, inspect, and manipulate images without mounting
+- **Supported file types** — Regular files and directories only (no symlinks, device nodes, FIFOs, or sockets)
 
 ## Quick Start
 
