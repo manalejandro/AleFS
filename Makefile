@@ -201,7 +201,7 @@ deb: $(TARGET)
 	cp $(TARGET) pkg/deb/usr/bin/alefs
 	ln -sf alefs pkg/deb/usr/bin/mkfs.alefs
 	# Documentation
-	cp README.md DESIGN.md LICENSE pkg/deb/usr/share/doc/alefs/
+	cp README.md LICENSE pkg/deb/usr/share/doc/alefs/
 	echo "AleFS $(VERSION) changelog" | gzip -9nf > pkg/deb/usr/share/doc/alefs/changelog.gz
 	chmod 644 pkg/deb/usr/share/doc/alefs/*.md
 	chmod 644 pkg/deb/usr/share/doc/alefs/LICENSE 2>/dev/null || true
@@ -232,6 +232,6 @@ deb: $(TARGET)
 	@echo "Package: pkg/alefs-$(VERSION).deb"
 
 dist: clean
-	tar czf alefs-$(VERSION).tar.gz src/ Makefile DESIGN.md README.md tests/ LICENSE pkg/
+	tar czf alefs-$(VERSION).tar.gz src/ Makefile README.md tests/ LICENSE pkg/
 
 -include $(DEPS)
