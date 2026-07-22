@@ -40,7 +40,7 @@ LDFLAGS_WIN ?= -lpthread -lshlwapi
 # Sources
 SRCDIR   = src
 BUILDDIR = build
-VERSION  := $(shell git describe --tags 2>/dev/null | sed 's/^v//' || echo "1.0.0")
+VERSION  := $(patsubst v%,%,$(shell git describe --tags 2>/dev/null || echo "1.0.0"))
 
 # Kernel module source (excluded from userspace build)
 KMOD_SRC := $(SRCDIR)/alefs_ko.c
