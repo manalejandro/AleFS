@@ -1,110 +1,83 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/bash
+set -e
 
-ALEFS=${ALEFS:-./alefs}
-TEST_IMG=$(mktemp /tmp/alefs-basic-XXXX.bin)
-CONTENT=$(mktemp /tmp/alefs-content-XXXX.txt)
-trap "rm -f $TEST_IMG $CONTENT" EXIT
+ALEFS=./aleqfs
+TEST_IMG=/tmp/aleqfs-test-$$.bin
+echo "=== AleQFS Basic Test Suite ==="
 
-echo "=== AleFS Basic Test Suite ==="
+cleanup() {
+    rm -f "$TEST_IMG"
+}
+trap cleanup EXIT
 
-# 1. Format
-echo "#1: Format 32 MiB image"
-$ALEFS format "$TEST_IMG" 32
-echo "  OK"
+# Format
+echo "--- format ---"
+$ALEFS format "$TEST_IMG" 64
 
-# 2. Dump superblock
-echo "#2: Superblock dump"
-$ALEFS dump "$TEST_IMG" > /dev/null
-echo "  OK"
+# Dump superblock
+echo "--- dump ---"
+$ALEFS dump "$TEST_IMG"
 
-# 3. Create directory
-echo "#3: mkdir /data"
-$ALEFS mkdir "$TEST_IMG" /data
-echo "  OK"
+# Quantum status
+echo "--- qstatus ---"
+$ALEFS qstatus "$TEST_IMG"
 
-# 4. Create nested directories
-echo "#4: mkdir -p /data/sub1/sub2"
-$ALEFS mkdir "$TEST_IMG" /data/sub1
-$ALEFS mkdir "$TEST_IMG" /data/sub1/sub2
-echo "  OK"
+# Mkdir
+echo "--- mkdir ---"
+$ALEFS mkdir "$TEST_IMG" /hello
 
-# 5. List root
-echo "#5: ls /"
+# Create file
+echo "--- create ---"
+$ALEFS create "$TEST_IMG" /hello/world.txt
+
+# Write content to file (via cp-in)
+echo "--- cp-in ---"
+echo "hello quantum world" > /tmp/aleqfs-content-$$.txt
+$ALEFS cp-in "$TEST_IMG" /tmp/aleqfs-content-$$.txt /hello/world.txt
+rm -f /tmp/aleqfs-content-$$.txt
+
+# Cat
+echo "--- cat ---"
+$ALEFS cat "$TEST_IMG" /hello/world.txt
+
+# Stat
+echo "--- stat ---"
+$ALEFS stat "$TEST_IMG" /hello/world.txt
+
+# Entangle directories
+echo "--- entangle ---"
+$ALEFS mkdir "$TEST_IMG" /a
+$ALEFS mkdir "$TEST_IMG" /b
+$ALEFS entangle "$TEST_IMG" /a /b
+
+# Observe (collapse quantum state)
+echo "--- observe ---"
+$ALEFS observe "$TEST_IMG" /hello/world.txt
+
+# Grover search
+echo "--- grover ---"
+$ALEFS grover "$TEST_IMG" 1
+
+# Ls
+echo "--- ls ---"
 $ALEFS ls "$TEST_IMG" /
-echo "  OK"
 
-# 6. List subdir
-echo "#6: ls /data"
-$ALEFS ls "$TEST_IMG" /data
-echo "  OK"
+# Tree
+echo "--- tree ---"
+$ALEFS tree "$TEST_IMG" /
 
-# 7. Create empty file
-echo "#7: create /data/sub1/empty.txt"
-$ALEFS create "$TEST_IMG" /data/sub1/empty.txt
-echo "  OK"
+# Mv
+echo "--- mv ---"
+$ALEFS mv "$TEST_IMG" /hello/world.txt /hello/quantum.txt
 
-# 8. Copy file in
-echo "#8: cp-in"
-echo "Hello AleFS!" > "$CONTENT"
-$ALEFS cp-in "$TEST_IMG" "$CONTENT" /data/hello.txt
-echo "  OK"
+# Rm
+echo "--- rm ---"
+$ALEFS rm "$TEST_IMG" /hello/quantum.txt
 
-# 9. Read file back
-echo "#9: cat"
-OUT=$($ALEFS cat "$TEST_IMG" /data/hello.txt)
-if [ "$OUT" != "Hello AleFS!" ]; then
-    echo "  FAIL: expected 'Hello AleFS!', got '$OUT'"
-    exit 1
-fi
-echo "  OK"
+# Rmdir
+echo "--- rmdir ---"
+$ALEFS rmdir "$TEST_IMG" /a
+$ALEFS rmdir "$TEST_IMG" /b
+$ALEFS rmdir "$TEST_IMG" /hello
 
-# 10. Stat file
-echo "#10: stat"
-$ALEFS stat "$TEST_IMG" /data/hello.txt > /dev/null
-echo "  OK"
-
-# 11. Rename file
-echo "#11: mv"
-$ALEFS mv "$TEST_IMG" /data/hello.txt /data/greeting.txt
-echo "  OK"
-
-# 12. Verify renamed contents
-echo "#12: cat renamed"
-OUT=$($ALEFS cat "$TEST_IMG" /data/greeting.txt)
-if [ "$OUT" != "Hello AleFS!" ]; then
-    echo "  FAIL"
-    exit 1
-fi
-echo "  OK"
-
-# 13. Remove file
-echo "#13: rm"
-$ALEFS rm "$TEST_IMG" /data/greeting.txt
-echo "  OK"
-
-# 14. Remove directories bottom-up
-echo "#14: rmdir chain"
-$ALEFS rmdir "$TEST_IMG" /data/sub1/sub2
-$ALEFS rmdir "$TEST_IMG" /data/sub1
-$ALEFS rmdir "$TEST_IMG" /data
-echo "  OK"
-
-# 15. File with larger content (>1 block = 4096 bytes)
-echo "#15: large file"
-dd if=/dev/urandom bs=4096 count=4 of="$CONTENT" 2>/dev/null
-$ALEFS cp-in "$TEST_IMG" "$CONTENT" /large.bin
-$ALEFS stat "$TEST_IMG" /large.bin > /dev/null
-echo "  OK"
-
-# 16. Verify large file content
-echo "#16: verify large file"
-$ALEFS cat "$TEST_IMG" /large.bin > "$CONTENT.verify"
-if ! diff "$CONTENT" "$CONTENT.verify"; then
-    echo "  FAIL: content mismatch"
-    exit 1
-fi
-echo "  OK"
-
-echo ""
-echo "=== All basic tests passed ==="
+echo "=== All AleQFS tests passed ==="

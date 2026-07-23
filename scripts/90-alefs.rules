@@ -1,7 +1,0 @@
-ACTION=="add", KERNEL=="sd*[0-9]|nvme[0-9]n*p*[0-9]|mmcblk[0-9]p*[0-9]", \
-  SUBSYSTEM=="block", \
-  IMPORT{program}="/usr/sbin/mount.alefs --probe $env{DEVNAME}"
-
-ENV{ID_FS_TYPE}=="alefs", \
-  ACTION=="add", SUBSYSTEM=="block", \
-  RUN+="/usr/sbin/mount.alefs $env{DEVNAME}"

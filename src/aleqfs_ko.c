@@ -16,14 +16,14 @@
 #include <linux/sched.h>
 #include <linux/mnt_idmapping.h>
 
-#include "alefs_layout.h"
+#include "aleqfs_layout.h"
 
-#define ALEFS_MOD_NAME  "alefs"
-#define ALEFS_MOD_DESC  "Adaptive Linux Efficient Filesystem"
-#define ALEFS_MOD_VER   "1.0.0"
+#define ALEQFS_MOD_NAME  "aleqfs"
+#define ALEQFS_MOD_DESC  "Adaptive Linux Efficient Quantum Filesystem"
+#define ALEQFS_MOD_VER   "2.0.0"
 
-struct alefs_sb_info {
-    struct alefs_superblock *sb;
+struct aleqfs_sb_info {
+    struct aleqfs_superblock *sb;
     struct buffer_head *sb_bh;
     unsigned long inode_table_start;
     unsigned long data_start;
@@ -32,17 +32,17 @@ struct alefs_sb_info {
     unsigned long block_size;
 };
 
-static inline struct alefs_sb_info *ALEFS_SB(struct super_block *sb)
+static inline struct aleqfs_sb_info *ALEQFS_SB(struct super_block *sb)
 {
     return sb->s_fs_info;
 }
 
-static int alefs_read_inode_block(struct super_block *sb, uint64_t ino,
+static int aleqfs_read_inode_block(struct super_block *sb, uint64_t ino,
                                    struct buffer_head **bhp, unsigned long *offset)
 {
-    struct alefs_sb_info *sbi = ALEFS_SB(sb);
-    unsigned long block = sbi->inode_table_start + (ino - 1) / ALEFS_INODES_PER_BLK;
-    *offset = ((ino - 1) % ALEFS_INODES_PER_BLK) * sizeof(struct alefs_inode);
+    struct aleqfs_sb_info *sbi = ALEQFS_SB(sb);
+    unsigned long block = sbi->inode_table_start + (ino - 1) / 16;
+    *offset = ((ino - 1) % 16) * ALEQFS_INODE_SIZE;
 
     if (block >= sbi->total_blocks)
         return -EIO;
@@ -53,9 +53,9 @@ static int alefs_read_inode_block(struct super_block *sb, uint64_t ino,
     return 0;
 }
 
-static int alefs_super_sync(struct super_block *sb)
+static int aleqfs_super_sync(struct super_block *sb)
 {
-    struct alefs_sb_info *sbi = ALEFS_SB(sb);
+    struct aleqfs_sb_info *sbi = ALEQFS_SB(sb);
     struct buffer_head *bh = sb_bread(sb, 0);
     if (!bh)
         return -EIO;
@@ -65,33 +65,32 @@ static int alefs_super_sync(struct super_block *sb)
     return 0;
 }
 
-static int alefs_bitmap_alloc(struct super_block *sb, uint64_t *block);
+static int aleqfs_bitmap_alloc(struct super_block *sb, uint64_t *block);
 
-/* Directory entry helpers.
- * Directory entries are stored in data blocks pointed to by the directory
- * inode's extents. Each block contains packed entries:
- *   struct alefs_direntry { uint64_t ino; uint8_t name_len; uint8_t name[]; }
- * Entries follow each other with no padding. name_len == 0 marks end.
- */
-
-static unsigned int alefs_dentry_size(unsigned int name_len)
+static uint64_t aleqfs_grover_hash_compute(const uint8_t *data, size_t len, uint64_t seed)
 {
-    return sizeof(struct alefs_direntry) + name_len;
+    uint64_t h = seed;
+    for (size_t i = 0; i < len; i++)
+        h = (h ^ data[i]) * 0x9e3779b97f4a7c15ULL;
+    return h;
 }
 
-/* Find matching entry in a single buffer_head block.
- * Returns offset in block if found, negative errno otherwise. */
-static int alefs_dir_find_in_bh(struct buffer_head *bh,
+static unsigned int aleqfs_dentry_size(unsigned int name_len)
+{
+    return sizeof(struct aleqfs_direntry) + name_len;
+}
+
+static int aleqfs_dir_find_in_bh(struct buffer_head *bh,
                                  const unsigned char *name,
                                  unsigned int name_len)
 {
     unsigned int off = 0;
-    while (off + sizeof(struct alefs_direntry) <= ALEFS_BLOCK_SIZE) {
-        struct alefs_direntry *de = (struct alefs_direntry *)(bh->b_data + off);
+    while (off + sizeof(struct aleqfs_direntry) <= ALEQFS_BLOCK_SIZE) {
+        struct aleqfs_direntry *de = (struct aleqfs_direntry *)(bh->b_data + off);
         if (de->name_len == 0)
             return -ENOENT;
-        unsigned int sz = alefs_dentry_size(de->name_len);
-        if (off + sz > ALEFS_BLOCK_SIZE)
+        unsigned int sz = aleqfs_dentry_size(de->name_len);
+        if (off + sz > ALEQFS_BLOCK_SIZE)
             break;
         if (de->name_len == name_len &&
             memcmp(de->name, name, name_len) == 0)
@@ -101,39 +100,36 @@ static int alefs_dir_find_in_bh(struct buffer_head *bh,
     return -ENOSPC;
 }
 
-/* Find the end-of-entries offset in a block (first zero name_len). */
-static unsigned int alefs_dir_end_in_bh(struct buffer_head *bh)
+static unsigned int aleqfs_dir_end_in_bh(struct buffer_head *bh)
 {
     unsigned int off = 0;
-    while (off + sizeof(struct alefs_direntry) <= ALEFS_BLOCK_SIZE) {
-        struct alefs_direntry *de = (struct alefs_direntry *)(bh->b_data + off);
+    while (off + sizeof(struct aleqfs_direntry) <= ALEQFS_BLOCK_SIZE) {
+        struct aleqfs_direntry *de = (struct aleqfs_direntry *)(bh->b_data + off);
         if (de->name_len == 0)
             return off;
-        unsigned int sz = alefs_dentry_size(de->name_len);
-        if (off + sz > ALEFS_BLOCK_SIZE)
-            return ALEFS_BLOCK_SIZE;
+        unsigned int sz = aleqfs_dentry_size(de->name_len);
+        if (off + sz > ALEQFS_BLOCK_SIZE)
+            return ALEQFS_BLOCK_SIZE;
         off += sz;
     }
-    return ALEFS_BLOCK_SIZE;
+    return ALEQFS_BLOCK_SIZE;
 }
 
-/* Add a directory entry: store (child_ino, name) in dir's data blocks. */
-static int alefs_dir_add_entry(struct super_block *sb, uint64_t dir_ino,
+static int aleqfs_dir_add_entry(struct super_block *sb, uint64_t dir_ino,
                                 uint64_t child_ino, const unsigned char *name,
                                 unsigned int name_len)
 {
-    if (name_len == 0 || name_len > ALEFS_MAX_NAME)
+    if (name_len == 0 || name_len > ALEQFS_MAX_NAME)
         return -EINVAL;
 
     struct buffer_head *dir_bh;
     unsigned long dir_off;
-    int ret = alefs_read_inode_block(sb, dir_ino, &dir_bh, &dir_off);
+    int ret = aleqfs_read_inode_block(sb, dir_ino, &dir_bh, &dir_off);
     if (ret) return ret;
-    struct alefs_inode *dir_ei = (struct alefs_inode *)(dir_bh->b_data + dir_off);
+    struct aleqfs_inode *dir_ei = (struct aleqfs_inode *)(dir_bh->b_data + dir_off);
 
-    unsigned int esize = alefs_dentry_size(name_len);
+    unsigned int esize = aleqfs_dentry_size(name_len);
 
-    /* Scan existing data blocks */
     for (unsigned int e = 0; e < dir_ei->extent_count; e++) {
         uint64_t start = dir_ei->extents[e].start;
         uint64_t count = dir_ei->extents[e].count;
@@ -142,25 +138,27 @@ static int alefs_dir_add_entry(struct super_block *sb, uint64_t dir_ino,
             struct buffer_head *bh = sb_bread(sb, start + b);
             if (!bh) { brelse(dir_bh); return -EIO; }
 
-            /* Look for duplicate name */
-            int found = alefs_dir_find_in_bh(bh, name, name_len);
+            int found = aleqfs_dir_find_in_bh(bh, name, name_len);
             if (found >= 0) {
-                struct alefs_direntry *de =
-                    (struct alefs_direntry *)(bh->b_data + found);
+                struct aleqfs_direntry *de =
+                    (struct aleqfs_direntry *)(bh->b_data + found);
                 de->ino = child_ino;
+                de->amplitude_real = 32767;
+                de->amplitude_imag = 0;
                 mark_buffer_dirty(bh);
                 brelse(bh);
                 brelse(dir_bh);
                 return 0;
             }
 
-            /* Check for free space at the end */
-            unsigned int end = alefs_dir_end_in_bh(bh);
-            if (end + esize <= ALEFS_BLOCK_SIZE) {
-                struct alefs_direntry *de =
-                    (struct alefs_direntry *)(bh->b_data + end);
+            unsigned int end = aleqfs_dir_end_in_bh(bh);
+            if (end + esize <= ALEQFS_BLOCK_SIZE) {
+                struct aleqfs_direntry *de =
+                    (struct aleqfs_direntry *)(bh->b_data + end);
                 de->ino = child_ino;
                 de->name_len = (uint8_t)name_len;
+                de->amplitude_real = 32767;
+                de->amplitude_imag = 0;
                 memcpy(de->name, name, name_len);
                 mark_buffer_dirty(bh);
                 brelse(bh);
@@ -171,28 +169,28 @@ static int alefs_dir_add_entry(struct super_block *sb, uint64_t dir_ino,
         }
     }
 
-    /* No space found — allocate a new block */
     uint64_t new_block;
-    ret = alefs_bitmap_alloc(sb, &new_block);
+    ret = aleqfs_bitmap_alloc(sb, &new_block);
     if (ret) { brelse(dir_bh); return ret; }
 
     struct buffer_head *nbh = sb_bread(sb, new_block);
     if (!nbh) { brelse(dir_bh); return -EIO; }
-    memset(nbh->b_data, 0, ALEFS_BLOCK_SIZE);
+    memset(nbh->b_data, 0, ALEQFS_BLOCK_SIZE);
 
-    struct alefs_direntry *de = (struct alefs_direntry *)nbh->b_data;
+    struct aleqfs_direntry *de = (struct aleqfs_direntry *)nbh->b_data;
     de->ino = child_ino;
     de->name_len = (uint8_t)name_len;
+    de->amplitude_real = 32767;
+    de->amplitude_imag = 0;
     memcpy(de->name, name, name_len);
     mark_buffer_dirty(nbh);
     brelse(nbh);
 
-    /* Update dir inode extent list */
     if (dir_ei->extent_count > 0) {
-        struct alefs_extent *last = &dir_ei->extents[dir_ei->extent_count - 1];
+        struct aleqfs_extent *last = &dir_ei->extents[dir_ei->extent_count - 1];
         if (last->start + last->count == new_block) {
             last->count++;
-        } else if (dir_ei->extent_count < ALEFS_NR_EXTENTS) {
+        } else if (dir_ei->extent_count < ALEQFS_NR_EXTENTS) {
             dir_ei->extents[dir_ei->extent_count].start = new_block;
             dir_ei->extents[dir_ei->extent_count].count = 1;
             dir_ei->extent_count++;
@@ -210,16 +208,15 @@ static int alefs_dir_add_entry(struct super_block *sb, uint64_t dir_ino,
     return 0;
 }
 
-/* Remove a directory entry by zeroing its name_len. */
-static int alefs_dir_remove_entry(struct super_block *sb, uint64_t dir_ino,
+static int aleqfs_dir_remove_entry(struct super_block *sb, uint64_t dir_ino,
                                    const unsigned char *name,
                                    unsigned int name_len)
 {
     struct buffer_head *dir_bh;
     unsigned long dir_off;
-    int ret = alefs_read_inode_block(sb, dir_ino, &dir_bh, &dir_off);
+    int ret = aleqfs_read_inode_block(sb, dir_ino, &dir_bh, &dir_off);
     if (ret) return ret;
-    struct alefs_inode *dir_ei = (struct alefs_inode *)(dir_bh->b_data + dir_off);
+    struct aleqfs_inode *dir_ei = (struct aleqfs_inode *)(dir_bh->b_data + dir_off);
     brelse(dir_bh);
 
     for (unsigned int e = 0; e < dir_ei->extent_count; e++) {
@@ -230,11 +227,11 @@ static int alefs_dir_remove_entry(struct super_block *sb, uint64_t dir_ino,
             struct buffer_head *bh = sb_bread(sb, start + b);
             if (!bh) continue;
 
-            int found = alefs_dir_find_in_bh(bh, name, name_len);
+            int found = aleqfs_dir_find_in_bh(bh, name, name_len);
             if (found >= 0) {
-                struct alefs_direntry *de =
-                    (struct alefs_direntry *)(bh->b_data + found);
-                de->name_len = 0;  /* mark deleted */
+                struct aleqfs_direntry *de =
+                    (struct aleqfs_direntry *)(bh->b_data + found);
+                de->name_len = 0;
                 mark_buffer_dirty(bh);
                 brelse(bh);
                 return 0;
@@ -245,16 +242,15 @@ static int alefs_dir_remove_entry(struct super_block *sb, uint64_t dir_ino,
     return -ENOENT;
 }
 
-/* Lookup a name in the directory, return child inode number (0 if not found). */
-static uint64_t alefs_dir_lookup(struct super_block *sb, uint64_t dir_ino,
+static uint64_t aleqfs_dir_lookup(struct super_block *sb, uint64_t dir_ino,
                                   const unsigned char *name,
                                   unsigned int name_len)
 {
     struct buffer_head *dir_bh;
     unsigned long dir_off;
-    int ret = alefs_read_inode_block(sb, dir_ino, &dir_bh, &dir_off);
+    int ret = aleqfs_read_inode_block(sb, dir_ino, &dir_bh, &dir_off);
     if (ret) return 0;
-    struct alefs_inode *dir_ei = (struct alefs_inode *)(dir_bh->b_data + dir_off);
+    struct aleqfs_inode *dir_ei = (struct aleqfs_inode *)(dir_bh->b_data + dir_off);
     brelse(dir_bh);
 
     for (unsigned int e = 0; e < dir_ei->extent_count; e++) {
@@ -265,11 +261,11 @@ static uint64_t alefs_dir_lookup(struct super_block *sb, uint64_t dir_ino,
             struct buffer_head *bh = sb_bread(sb, start + b);
             if (!bh) continue;
 
-            int found = alefs_dir_find_in_bh(bh, name, name_len);
+            int found = aleqfs_dir_find_in_bh(bh, name, name_len);
             brelse(bh);
             if (found >= 0) {
-                struct alefs_direntry *de =
-                    (struct alefs_direntry *)(bh->b_data + found);
+                struct aleqfs_direntry *de =
+                    (struct aleqfs_direntry *)(bh->b_data + found);
                 return de->ino;
             }
         }
@@ -277,14 +273,14 @@ static uint64_t alefs_dir_lookup(struct super_block *sb, uint64_t dir_ino,
     return 0;
 }
 
-static int __maybe_unused alefs_bitmap_set(struct super_block *sb, uint64_t block, bool value)
+static int __maybe_unused aleqfs_bitmap_set(struct super_block *sb, uint64_t block, bool value)
 {
-    struct alefs_sb_info *sbi = ALEFS_SB(sb);
+    struct aleqfs_sb_info *sbi = ALEQFS_SB(sb);
     uint64_t bitmap_start = sbi->sb->bitmap_start;
     uint64_t byte_off = block / 8;
     uint64_t bit_off = block % 8;
-    uint64_t buf_block = bitmap_start + byte_off / ALEFS_BLOCK_SIZE;
-    unsigned long buf_off = byte_off % ALEFS_BLOCK_SIZE;
+    uint64_t buf_block = bitmap_start + byte_off / ALEQFS_BLOCK_SIZE;
+    unsigned long buf_off = byte_off % ALEQFS_BLOCK_SIZE;
 
     struct buffer_head *bh = sb_bread(sb, buf_block);
     if (!bh)
@@ -301,18 +297,18 @@ static int __maybe_unused alefs_bitmap_set(struct super_block *sb, uint64_t bloc
     return 0;
 }
 
-static int alefs_bitmap_alloc(struct super_block *sb, uint64_t *block)
+static int aleqfs_bitmap_alloc(struct super_block *sb, uint64_t *block)
 {
-    struct alefs_sb_info *sbi = ALEFS_SB(sb);
-    uint64_t bitmap_bytes = ALEFS_BITMAP_BLOCKS * ALEFS_BLOCK_SIZE;
+    struct aleqfs_sb_info *sbi = ALEQFS_SB(sb);
+    uint64_t bitmap_bytes = ALEQFS_BITMAP_BLOCKS * ALEQFS_BLOCK_SIZE;
 
     for (uint64_t i = sbi->data_start; i < sbi->total_blocks; i++) {
         uint64_t byte_off = i / 8;
         uint64_t bit_off = i % 8;
         if (byte_off >= bitmap_bytes)
             break;
-        uint64_t buf_block = sbi->sb->bitmap_start + byte_off / ALEFS_BLOCK_SIZE;
-        unsigned long buf_off = byte_off % ALEFS_BLOCK_SIZE;
+        uint64_t buf_block = sbi->sb->bitmap_start + byte_off / ALEQFS_BLOCK_SIZE;
+        unsigned long buf_off = byte_off % ALEQFS_BLOCK_SIZE;
 
         struct buffer_head *bh = sb_bread(sb, buf_block);
         if (!bh)
@@ -325,7 +321,7 @@ static int alefs_bitmap_alloc(struct super_block *sb, uint64_t *block)
             brelse(bh);
             *block = i;
             sbi->sb->free_blocks--;
-            alefs_super_sync(sb);
+            aleqfs_super_sync(sb);
             return 0;
         }
         brelse(bh);
@@ -333,25 +329,25 @@ static int alefs_bitmap_alloc(struct super_block *sb, uint64_t *block)
     return -ENOSPC;
 }
 
-static int alefs_inode_alloc(struct super_block *sb, uint64_t *ino)
+static int aleqfs_inode_alloc(struct super_block *sb, uint64_t *ino)
 {
-    struct alefs_sb_info *sbi = ALEFS_SB(sb);
+    struct aleqfs_sb_info *sbi = ALEQFS_SB(sb);
 
-    for (uint64_t i = ALEFS_ROOT_INO; i <= sbi->inode_count; i++) {
+    for (uint64_t i = ALEQFS_ROOT_INO; i <= sbi->inode_count; i++) {
         struct buffer_head *bh;
         unsigned long offset;
-        int ret = alefs_read_inode_block(sb, i, &bh, &offset);
+        int ret = aleqfs_read_inode_block(sb, i, &bh, &offset);
         if (ret)
             continue;
 
-        struct alefs_inode *ei = (struct alefs_inode *)(bh->b_data + offset);
+        struct aleqfs_inode *ei = (struct aleqfs_inode *)(bh->b_data + offset);
         if (ei->mode == 0) {
             memset(ei, 0, sizeof(*ei));
             mark_buffer_dirty(bh);
             brelse(bh);
             *ino = i;
             sbi->sb->free_inodes--;
-            alefs_super_sync(sb);
+            aleqfs_super_sync(sb);
             return 0;
         }
         brelse(bh);
@@ -359,35 +355,35 @@ static int alefs_inode_alloc(struct super_block *sb, uint64_t *ino)
     return -ENOSPC;
 }
 
-static int alefs_inode_dirty(struct super_block *sb, uint64_t ino,
-                              const struct alefs_inode *inode)
+static int aleqfs_inode_dirty(struct super_block *sb, uint64_t ino,
+                              const struct aleqfs_inode *inode)
 {
     struct buffer_head *bh;
     unsigned long offset;
-    int ret = alefs_read_inode_block(sb, ino, &bh, &offset);
+    int ret = aleqfs_read_inode_block(sb, ino, &bh, &offset);
     if (ret)
         return ret;
-    struct alefs_inode *ei = (struct alefs_inode *)(bh->b_data + offset);
+    struct aleqfs_inode *ei = (struct aleqfs_inode *)(bh->b_data + offset);
     memcpy(ei, inode, sizeof(*ei));
     mark_buffer_dirty(bh);
     brelse(bh);
     return 0;
 }
 
-static int alefs_read_inode(struct inode *inode)
+static int aleqfs_read_inode(struct inode *inode)
 {
     struct super_block *sb = inode->i_sb;
     struct buffer_head *bh;
     unsigned long offset;
-    struct alefs_inode *ei;
+    struct aleqfs_inode *ei;
     uint64_t ino = inode->i_ino;
     int ret;
 
-    ret = alefs_read_inode_block(sb, ino, &bh, &offset);
+    ret = aleqfs_read_inode_block(sb, ino, &bh, &offset);
     if (ret)
         return ret;
 
-    ei = (struct alefs_inode *)(bh->b_data + offset);
+    ei = (struct aleqfs_inode *)(bh->b_data + offset);
 
     inode->i_mode   = ei->mode;
     inode->i_uid.val = ei->uid;
@@ -403,20 +399,20 @@ static int alefs_read_inode(struct inode *inode)
     return 0;
 }
 
-static int alefs_write_inode(struct inode *inode, struct writeback_control *wbc)
+static int aleqfs_write_inode(struct inode *inode, struct writeback_control *wbc)
 {
     struct super_block *sb = inode->i_sb;
     struct buffer_head *bh;
     unsigned long offset;
-    struct alefs_inode *ei;
+    struct aleqfs_inode *ei;
     uint64_t ino = inode->i_ino;
     int ret;
 
-    ret = alefs_read_inode_block(sb, ino, &bh, &offset);
+    ret = aleqfs_read_inode_block(sb, ino, &bh, &offset);
     if (ret)
         return ret;
 
-    ei = (struct alefs_inode *)(bh->b_data + offset);
+    ei = (struct aleqfs_inode *)(bh->b_data + offset);
 
     ei->mode   = inode->i_mode;
     ei->uid    = from_kuid(&init_user_ns, inode->i_uid);
@@ -433,7 +429,7 @@ static int alefs_write_inode(struct inode *inode, struct writeback_control *wbc)
     return 0;
 }
 
-static int alefs_getattr(struct mnt_idmap *idmap,
+static int aleqfs_getattr(struct mnt_idmap *idmap,
                           const struct path *path, struct kstat *stat,
                           u32 request_mask, unsigned int flags)
 {
@@ -442,24 +438,26 @@ static int alefs_getattr(struct mnt_idmap *idmap,
     return 0;
 }
 
-static int alefs_open(struct inode *inode, struct file *file)
+static int aleqfs_open(struct inode *inode, struct file *file)
 {
     return 0;
 }
 
-static int alefs_release(struct inode *inode, struct file *file)
+static int aleqfs_release(struct inode *inode, struct file *file)
 {
     return 0;
 }
 
-static ssize_t alefs_read(struct file *file, char __user *buf,
+static ssize_t aleqfs_read(struct file *file, char __user *buf,
                            size_t len, loff_t *ppos)
 {
     struct inode *inode = file_inode(file);
     struct super_block *sb = inode->i_sb;
-    struct alefs_sb_info *sbi = ALEFS_SB(sb);
+    struct aleqfs_sb_info *sbi = ALEQFS_SB(sb);
     loff_t pos = *ppos;
     ssize_t ret = 0;
+    uint64_t grover_hash = 0;
+    bool do_decoherence = false;
 
     if (pos < 0)
         return -EINVAL;
@@ -468,6 +466,17 @@ static ssize_t alefs_read(struct file *file, char __user *buf,
     if (len > inode->i_size - pos)
         len = inode->i_size - pos;
 
+    struct buffer_head *inode_bh;
+    unsigned long io;
+    struct aleqfs_inode *ei;
+
+    if (aleqfs_read_inode_block(sb, inode->i_ino, &inode_bh, &io))
+        return -EIO;
+    ei = (struct aleqfs_inode *)(inode_bh->b_data + io);
+    if (ei->grover_hash != 0)
+        do_decoherence = true;
+    brelse(inode_bh);
+
     while (len > 0) {
         uint64_t block_off = pos / sbi->block_size;
         uint64_t byte_off = pos % sbi->block_size;
@@ -475,13 +484,10 @@ static ssize_t alefs_read(struct file *file, char __user *buf,
         uint64_t dev_block;
         uint64_t extent_off = 0;
         unsigned int i;
-        struct buffer_head *inode_bh;
-        unsigned long io;
-        struct alefs_inode *ei;
 
-        if (alefs_read_inode_block(sb, inode->i_ino, &inode_bh, &io))
+        if (aleqfs_read_inode_block(sb, inode->i_ino, &inode_bh, &io))
             return ret ? ret : -EIO;
-        ei = (struct alefs_inode *)(inode_bh->b_data + io);
+        ei = (struct aleqfs_inode *)(inode_bh->b_data + io);
 
         dev_block = 0;
         for (i = 0; i < ei->extent_count; i++) {
@@ -503,6 +509,10 @@ static ssize_t alefs_read(struct file *file, char __user *buf,
         size_t to_copy = sbi->block_size - byte_off;
         if (to_copy > len) to_copy = len;
 
+        if (do_decoherence)
+            grover_hash ^= aleqfs_grover_hash_compute(bh->b_data + byte_off,
+                                                      to_copy, 0);
+
         if (copy_to_user(buf, bh->b_data + byte_off, to_copy)) {
             brelse(bh);
             return ret ? ret : -EFAULT;
@@ -516,17 +526,34 @@ static ssize_t alefs_read(struct file *file, char __user *buf,
     }
 
     *ppos = pos;
+
+    if (do_decoherence) {
+        struct buffer_head *ibh;
+        unsigned long ioff;
+        if (!aleqfs_read_inode_block(sb, inode->i_ino, &ibh, &ioff)) {
+            struct aleqfs_inode *ei2 = (struct aleqfs_inode *)(ibh->b_data + ioff);
+            if (grover_hash != ei2->grover_hash)
+                pr_warn("aleqfs: quantum decoherence detected on inode %llu "
+                        "(observed hash 0x%llx != stored 0x%llx)\n",
+                        (unsigned long long)inode->i_ino,
+                        (unsigned long long)grover_hash,
+                        (unsigned long long)ei2->grover_hash);
+            brelse(ibh);
+        }
+    }
+
     return ret;
 }
 
-static ssize_t alefs_write(struct file *file, const char __user *buf,
+static ssize_t aleqfs_write(struct file *file, const char __user *buf,
                             size_t len, loff_t *ppos)
 {
     struct inode *inode = file_inode(file);
     struct super_block *sb = inode->i_sb;
-    struct alefs_sb_info *sbi = ALEFS_SB(sb);
+    struct aleqfs_sb_info *sbi = ALEQFS_SB(sb);
     loff_t pos = *ppos;
     ssize_t written = 0;
+    uint64_t grover_hash = 0;
 
     if (pos < 0)
         return -EINVAL;
@@ -542,13 +569,13 @@ static ssize_t alefs_write(struct file *file, const char __user *buf,
         int found = 0;
         struct buffer_head *inode_bh;
         unsigned long io;
-        struct alefs_inode *ei;
+        struct aleqfs_inode *ei;
 
-        if (alefs_read_inode_block(sb, inode->i_ino, &inode_bh, &io)) {
+        if (aleqfs_read_inode_block(sb, inode->i_ino, &inode_bh, &io)) {
             inode_unlock(inode);
             return written ? written : -EIO;
         }
-        ei = (struct alefs_inode *)(inode_bh->b_data + io);
+        ei = (struct aleqfs_inode *)(inode_bh->b_data + io);
 
         uint64_t extent_off = 0;
         for (unsigned int i = 0; i < ei->extent_count; i++) {
@@ -563,14 +590,14 @@ static ssize_t alefs_write(struct file *file, const char __user *buf,
 
         if (!found) {
             uint64_t new_block;
-            int ret = alefs_bitmap_alloc(sb, &new_block);
+            int ret = aleqfs_bitmap_alloc(sb, &new_block);
             if (ret) {
                 brelse(inode_bh);
                 break;
             }
 
             if (ei->extent_count > 0) {
-                struct alefs_extent *last = &ei->extents[ei->extent_count - 1];
+                struct aleqfs_extent *last = &ei->extents[ei->extent_count - 1];
                 if (last->start + last->count == new_block) {
                     last->count++;
                     dev_block = new_block;
@@ -580,7 +607,7 @@ static ssize_t alefs_write(struct file *file, const char __user *buf,
                 }
             }
 
-            if (ei->extent_count >= ALEFS_NR_EXTENTS) {
+            if (ei->extent_count >= ALEQFS_NR_EXTENTS) {
                 brelse(inode_bh);
                 break;
             }
@@ -607,6 +634,9 @@ write_data:
             break;
         }
         mark_buffer_dirty(data_bh);
+
+        grover_hash ^= aleqfs_grover_hash_compute(data_bh->b_data + byte_off,
+                                                  to_write, 0);
         brelse(data_bh);
 
         buf += to_write;
@@ -616,41 +646,51 @@ write_data:
 
         if (pos > inode->i_size) {
             inode->i_size = pos;
-            inode->i_blocks = pos / ALEFS_BLOCK_SIZE + 1;
+            inode->i_blocks = pos / ALEQFS_BLOCK_SIZE + 1;
         }
     }
-
-    inode_unlock(inode);
 
     if (written > 0) {
         *ppos = pos;
         struct timespec64 now = current_time(inode);
         inode_set_mtime(inode, now.tv_sec, now.tv_nsec);
         mark_inode_dirty(inode);
+
+        struct buffer_head *ibh;
+        unsigned long ioff;
+        if (!aleqfs_read_inode_block(sb, inode->i_ino, &ibh, &ioff)) {
+            struct aleqfs_inode *ei = (struct aleqfs_inode *)(ibh->b_data + ioff);
+            ei->grover_hash = grover_hash;
+            mark_buffer_dirty(ibh);
+            brelse(ibh);
+        }
     }
+
+    inode_unlock(inode);
+
     return written ? written : -ENOSPC;
 }
 
-static const struct file_operations alefs_file_ops = {
-    .open    = alefs_open,
-    .release = alefs_release,
-    .read    = alefs_read,
-    .write   = alefs_write,
+static const struct file_operations aleqfs_file_ops = {
+    .open    = aleqfs_open,
+    .release = aleqfs_release,
+    .read    = aleqfs_read,
+    .write   = aleqfs_write,
     .llseek  = generic_file_llseek,
 };
 
-static const struct inode_operations alefs_dir_inode_ops;
-static const struct file_operations alefs_dir_ops;
-static const struct inode_operations alefs_inode_ops;
+static const struct inode_operations aleqfs_dir_inode_ops;
+static const struct file_operations aleqfs_dir_ops;
+static const struct inode_operations aleqfs_inode_ops;
 
-static struct dentry *alefs_lookup(struct inode *dir, struct dentry *dentry,
+static struct dentry *aleqfs_lookup(struct inode *dir, struct dentry *dentry,
                                     unsigned int flags)
 {
     struct super_block *sb = dir->i_sb;
     const unsigned char *name = dentry->d_name.name;
     unsigned int name_len = dentry->d_name.len;
 
-    uint64_t child_ino = alefs_dir_lookup(sb, dir->i_ino, name, name_len);
+    uint64_t child_ino = aleqfs_dir_lookup(sb, dir->i_ino, name, name_len);
     if (!child_ino) {
         d_add(dentry, NULL);
         return NULL;
@@ -661,13 +701,13 @@ static struct dentry *alefs_lookup(struct inode *dir, struct dentry *dentry,
         return ERR_PTR(-ENOMEM);
 
     if (child->i_state & I_NEW) {
-        alefs_read_inode(child);
+        aleqfs_read_inode(child);
         if (S_ISDIR(child->i_mode)) {
-            child->i_op = &alefs_dir_inode_ops;
-            child->i_fop = &alefs_dir_ops;
+            child->i_op = &aleqfs_dir_inode_ops;
+            child->i_fop = &aleqfs_dir_ops;
         } else {
-            child->i_op = &alefs_inode_ops;
-            child->i_fop = &alefs_file_ops;
+            child->i_op = &aleqfs_inode_ops;
+            child->i_fop = &aleqfs_file_ops;
         }
         unlock_new_inode(child);
     }
@@ -680,7 +720,7 @@ static struct dentry *alefs_lookup(struct inode *dir, struct dentry *dentry,
     return d_splice_alias(child, dentry);
 }
 
-static int alefs_iterate(struct file *file, struct dir_context *ctx)
+static int aleqfs_iterate(struct file *file, struct dir_context *ctx)
 {
     struct inode *dir = file_inode(file);
     struct super_block *sb = dir->i_sb;
@@ -696,15 +736,15 @@ static int alefs_iterate(struct file *file, struct dir_context *ctx)
 
     struct buffer_head *dir_bh;
     unsigned long dir_off;
-    if (alefs_read_inode_block(sb, dir->i_ino, &dir_bh, &dir_off))
+    if (aleqfs_read_inode_block(sb, dir->i_ino, &dir_bh, &dir_off))
         return -EIO;
-    struct alefs_inode *dir_ei = (struct alefs_inode *)(dir_bh->b_data + dir_off);
+    struct aleqfs_inode *dir_ei = (struct aleqfs_inode *)(dir_bh->b_data + dir_off);
     unsigned int dir_extent_count = dir_ei->extent_count;
-    struct alefs_extent dir_extents[ALEFS_NR_EXTENTS];
+    struct aleqfs_extent dir_extents[ALEQFS_NR_EXTENTS];
     memcpy(dir_extents, dir_ei->extents, sizeof(dir_extents));
     brelse(dir_bh);
 
-    unsigned long long entry_idx = 1;  /* 0 = dots, 1+ = entries */
+    unsigned long long entry_idx = 1;
 
     for (unsigned int e = 0; e < dir_extent_count; e++) {
         uint64_t start = dir_extents[e].start;
@@ -715,13 +755,13 @@ static int alefs_iterate(struct file *file, struct dir_context *ctx)
             if (!bh) continue;
 
             unsigned int off = 0;
-            while (off + sizeof(struct alefs_direntry) <= ALEFS_BLOCK_SIZE) {
-                struct alefs_direntry *de =
-                    (struct alefs_direntry *)(bh->b_data + off);
+            while (off + sizeof(struct aleqfs_direntry) <= ALEQFS_BLOCK_SIZE) {
+                struct aleqfs_direntry *de =
+                    (struct aleqfs_direntry *)(bh->b_data + off);
                 if (de->name_len == 0)
                     break;
-                unsigned int sz = alefs_dentry_size(de->name_len);
-                if (off + sz > ALEFS_BLOCK_SIZE)
+                unsigned int sz = aleqfs_dentry_size(de->name_len);
+                if (off + sz > ALEQFS_BLOCK_SIZE)
                     break;
 
                 if (entry_idx >= (unsigned long long)ctx->pos) {
@@ -737,7 +777,8 @@ static int alefs_iterate(struct file *file, struct dir_context *ctx)
                         brelse(bh);
                         return 0;
                     }
-                    ctx->pos++;
+
+                    ctx->pos = entry_idx + 1;
                 }
                 entry_idx++;
                 off += sz;
@@ -748,55 +789,62 @@ static int alefs_iterate(struct file *file, struct dir_context *ctx)
     return 0;
 }
 
-static int alefs_add_dentry(struct super_block *sb, struct inode *dir,
+static int aleqfs_add_dentry(struct super_block *sb, struct inode *dir,
                              uint64_t child_ino, const char *name,
                              unsigned int name_len)
 {
-    return alefs_dir_add_entry(sb, dir->i_ino, child_ino,
+    return aleqfs_dir_add_entry(sb, dir->i_ino, child_ino,
                                 (const unsigned char *)name, name_len);
 }
 
-static int alefs_remove_dentry(struct super_block *sb, struct inode *dir,
+static int aleqfs_remove_dentry(struct super_block *sb, struct inode *dir,
                                 const char *name, unsigned int name_len)
 {
-    return alefs_dir_remove_entry(sb, dir->i_ino,
+    return aleqfs_dir_remove_entry(sb, dir->i_ino,
                                    (const unsigned char *)name, name_len);
 }
 
-static int alefs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+static int aleqfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
                         struct dentry *dentry, umode_t mode)
 {
     struct super_block *sb = dir->i_sb;
     uint64_t ino;
     int ret;
 
-    ret = alefs_inode_alloc(sb, &ino);
+    ret = aleqfs_inode_alloc(sb, &ino);
     if (ret)
         return ret;
 
     struct timespec64 now = current_time(dir);
-    struct alefs_inode ei;
+    struct aleqfs_inode ei;
     memset(&ei, 0, sizeof(ei));
     ei.mode  = S_IFDIR | (mode & 07777);
     ei.uid   = from_kuid(&init_user_ns, current_fsuid());
     ei.gid   = from_kgid(&init_user_ns, current_fsgid());
     ei.links = 2;
     ei.atime = ei.mtime = ei.ctime = now.tv_sec;
+    ei.amplitude.real = 32767;
+    ei.amplitude.imag = 0;
+    ei.grover_hash = 0;
+    ei.decoherence_stamp = now.tv_sec;
+    ei.observe_count = 0;
+    ei.entanglement_partner = 0;
+    ei.entanglement_ops = 0;
 
-    ret = alefs_inode_dirty(sb, ino, &ei);
+    ret = aleqfs_inode_dirty(sb, ino, &ei);
     if (ret)
         return ret;
 
-    ret = alefs_add_dentry(sb, dir, ino, dentry->d_name.name, dentry->d_name.len);
+    ret = aleqfs_add_dentry(sb, dir, ino, dentry->d_name.name, dentry->d_name.len);
     if (ret)
         return ret;
 
     struct inode *child = iget_locked(sb, ino);
     if (!child)
         return -ENOMEM;
-    alefs_read_inode(child);
-    child->i_op = &alefs_dir_inode_ops;
-    child->i_fop = &alefs_dir_ops;
+    aleqfs_read_inode(child);
+    child->i_op = &aleqfs_dir_inode_ops;
+    child->i_fop = &aleqfs_dir_ops;
     unlock_new_inode(child);
 
     d_instantiate(dentry, child);
@@ -805,40 +853,47 @@ static int alefs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
     return 0;
 }
 
-static int alefs_create(struct mnt_idmap *idmap, struct inode *dir,
+static int aleqfs_create(struct mnt_idmap *idmap, struct inode *dir,
                          struct dentry *dentry, umode_t mode, bool excl)
 {
     struct super_block *sb = dir->i_sb;
     uint64_t ino;
     int ret;
 
-    ret = alefs_inode_alloc(sb, &ino);
+    ret = aleqfs_inode_alloc(sb, &ino);
     if (ret)
         return ret;
 
     struct timespec64 now = current_time(dir);
-    struct alefs_inode ei;
+    struct aleqfs_inode ei;
     memset(&ei, 0, sizeof(ei));
     ei.mode  = S_IFREG | (mode & 07777);
     ei.uid   = from_kuid(&init_user_ns, current_fsuid());
     ei.gid   = from_kgid(&init_user_ns, current_fsgid());
     ei.links = 1;
     ei.atime = ei.mtime = ei.ctime = now.tv_sec;
+    ei.amplitude.real = 32767;
+    ei.amplitude.imag = 0;
+    ei.grover_hash = 0;
+    ei.decoherence_stamp = now.tv_sec;
+    ei.observe_count = 0;
+    ei.entanglement_partner = 0;
+    ei.entanglement_ops = 0;
 
-    ret = alefs_inode_dirty(sb, ino, &ei);
+    ret = aleqfs_inode_dirty(sb, ino, &ei);
     if (ret)
         return ret;
 
-    ret = alefs_add_dentry(sb, dir, ino, dentry->d_name.name, dentry->d_name.len);
+    ret = aleqfs_add_dentry(sb, dir, ino, dentry->d_name.name, dentry->d_name.len);
     if (ret)
         return ret;
 
     struct inode *child = iget_locked(sb, ino);
     if (!child)
         return -ENOMEM;
-    alefs_read_inode(child);
-    child->i_op = &alefs_inode_ops;
-    child->i_fop = &alefs_file_ops;
+    aleqfs_read_inode(child);
+    child->i_op = &aleqfs_inode_ops;
+    child->i_fop = &aleqfs_file_ops;
     unlock_new_inode(child);
 
     d_instantiate(dentry, child);
@@ -846,7 +901,7 @@ static int alefs_create(struct mnt_idmap *idmap, struct inode *dir,
     return 0;
 }
 
-static int alefs_unlink(struct inode *dir, struct dentry *dentry)
+static int aleqfs_unlink(struct inode *dir, struct dentry *dentry)
 {
     struct super_block *sb = dir->i_sb;
     struct inode *child = d_inode(dentry);
@@ -855,7 +910,7 @@ static int alefs_unlink(struct inode *dir, struct dentry *dentry)
     if (S_ISDIR(child->i_mode))
         return -EISDIR;
 
-    int ret = alefs_remove_dentry(sb, dir, dentry->d_name.name, dentry->d_name.len);
+    int ret = aleqfs_remove_dentry(sb, dir, dentry->d_name.name, dentry->d_name.len);
     if (ret)
         return ret;
 
@@ -866,7 +921,7 @@ static int alefs_unlink(struct inode *dir, struct dentry *dentry)
     return 0;
 }
 
-static int alefs_rmdir(struct inode *dir, struct dentry *dentry)
+static int aleqfs_rmdir(struct inode *dir, struct dentry *dentry)
 {
     struct super_block *sb = dir->i_sb;
     struct inode *child = d_inode(dentry);
@@ -875,7 +930,7 @@ static int alefs_rmdir(struct inode *dir, struct dentry *dentry)
     if (!S_ISDIR(child->i_mode))
         return -ENOTDIR;
 
-    int ret = alefs_remove_dentry(sb, dir, dentry->d_name.name, dentry->d_name.len);
+    int ret = aleqfs_remove_dentry(sb, dir, dentry->d_name.name, dentry->d_name.len);
     if (ret)
         return ret;
 
@@ -886,7 +941,7 @@ static int alefs_rmdir(struct inode *dir, struct dentry *dentry)
     return 0;
 }
 
-static int alefs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
+static int aleqfs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
                          struct dentry *old_dentry, struct inode *new_dir,
                          struct dentry *new_dentry, unsigned int flags)
 {
@@ -895,15 +950,15 @@ static int alefs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
     if (!child)
         return -ENOENT;
 
-    int ret = alefs_remove_dentry(sb, old_dir, old_dentry->d_name.name,
+    int ret = aleqfs_remove_dentry(sb, old_dir, old_dentry->d_name.name,
                                    old_dentry->d_name.len);
     if (ret)
         return ret;
 
-    ret = alefs_add_dentry(sb, new_dir, child->i_ino,
+    ret = aleqfs_add_dentry(sb, new_dir, child->i_ino,
                             new_dentry->d_name.name, new_dentry->d_name.len);
     if (ret) {
-        alefs_add_dentry(sb, old_dir, child->i_ino,
+        aleqfs_add_dentry(sb, old_dir, child->i_ino,
                           old_dentry->d_name.name, old_dentry->d_name.len);
         return ret;
     }
@@ -917,30 +972,30 @@ static int alefs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
     return 0;
 }
 
-static const struct inode_operations alefs_dir_inode_ops = {
-    .lookup  = alefs_lookup,
-    .mkdir   = alefs_mkdir,
-    .create  = alefs_create,
-    .unlink  = alefs_unlink,
-    .rmdir   = alefs_rmdir,
-    .rename  = alefs_rename,
-    .getattr = alefs_getattr,
+static const struct inode_operations aleqfs_dir_inode_ops = {
+    .lookup  = aleqfs_lookup,
+    .mkdir   = aleqfs_mkdir,
+    .create  = aleqfs_create,
+    .unlink  = aleqfs_unlink,
+    .rmdir   = aleqfs_rmdir,
+    .rename  = aleqfs_rename,
+    .getattr = aleqfs_getattr,
 };
 
-static const struct file_operations alefs_dir_ops = {
-    .open    = alefs_open,
-    .release = alefs_release,
-    .iterate_shared = alefs_iterate,
+static const struct file_operations aleqfs_dir_ops = {
+    .open    = aleqfs_open,
+    .release = aleqfs_release,
+    .iterate_shared = aleqfs_iterate,
     .llseek  = generic_file_llseek,
 };
 
-static const struct inode_operations alefs_inode_ops = {
-    .getattr = alefs_getattr,
+static const struct inode_operations aleqfs_inode_ops = {
+    .getattr = aleqfs_getattr,
 };
 
-static void alefs_put_super(struct super_block *sb)
+static void aleqfs_put_super(struct super_block *sb)
 {
-    struct alefs_sb_info *sbi = ALEFS_SB(sb);
+    struct aleqfs_sb_info *sbi = ALEQFS_SB(sb);
     if (sbi) {
         if (sbi->sb_bh)
             brelse(sbi->sb_bh);
@@ -948,34 +1003,35 @@ static void alefs_put_super(struct super_block *sb)
     }
 }
 
-static int alefs_statfs(struct dentry *dentry, struct kstatfs *buf)
+static int aleqfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
     struct super_block *sb = dentry->d_sb;
-    struct alefs_sb_info *sbi = ALEFS_SB(sb);
+    struct aleqfs_sb_info *sbi = ALEQFS_SB(sb);
 
-    buf->f_type    = ALEFS_MAGIC;
+    buf->f_type    = ALEQFS_MAGIC;
     buf->f_bsize   = sbi->block_size;
     buf->f_blocks  = sbi->total_blocks;
     buf->f_bfree   = sbi->sb->free_blocks;
     buf->f_bavail  = sbi->sb->free_blocks;
     buf->f_files   = sbi->inode_count;
     buf->f_ffree   = sbi->sb->free_inodes;
-    buf->f_namelen = ALEFS_MAX_NAME;
+    buf->f_frsize  = sbi->block_size;
+    buf->f_namelen = ALEQFS_MAX_NAME;
     return 0;
 }
 
-static const struct super_operations alefs_super_ops = {
-    .write_inode   = alefs_write_inode,
-    .put_super     = alefs_put_super,
-    .statfs        = alefs_statfs,
+static const struct super_operations aleqfs_super_ops = {
+    .write_inode   = aleqfs_write_inode,
+    .put_super     = aleqfs_put_super,
+    .statfs        = aleqfs_statfs,
 };
 
-static int alefs_fill_super(struct super_block *sb, void *data, int silent)
+static int aleqfs_fill_super(struct super_block *sb, void *data, int silent)
 {
-    struct alefs_sb_info *sbi;
+    struct aleqfs_sb_info *sbi;
     struct buffer_head *bh;
     struct inode *root_inode;
-    struct alefs_superblock *disk_sb;
+    struct aleqfs_superblock *disk_sb;
     int ret = 0;
 
     sbi = kzalloc(sizeof(*sbi), GFP_KERNEL);
@@ -990,11 +1046,11 @@ static int alefs_fill_super(struct super_block *sb, void *data, int silent)
         goto fail;
     }
 
-    disk_sb = (struct alefs_superblock *)bh->b_data;
+    disk_sb = (struct aleqfs_superblock *)bh->b_data;
 
-    if (disk_sb->magic != ALEFS_MAGIC) {
+    if (disk_sb->magic != ALEQFS_MAGIC) {
         if (!silent)
-            pr_err("alefs: wrong magic 0x%llx\n",
+            pr_err("aleqfs: wrong magic 0x%llx\n",
                    (unsigned long long)disk_sb->magic);
         brelse(bh);
         ret = -EINVAL;
@@ -1003,8 +1059,8 @@ static int alefs_fill_super(struct super_block *sb, void *data, int silent)
 
     brelse(bh);
 
-    if (!sb_set_blocksize(sb, ALEFS_BLOCK_SIZE)) {
-        pr_err("alefs: block size %u not supported by device\n", ALEFS_BLOCK_SIZE);
+    if (!sb_set_blocksize(sb, ALEQFS_BLOCK_SIZE)) {
+        pr_err("aleqfs: block size %u not supported by device\n", ALEQFS_BLOCK_SIZE);
         ret = -EINVAL;
         goto fail;
     }
@@ -1015,28 +1071,28 @@ static int alefs_fill_super(struct super_block *sb, void *data, int silent)
         goto fail;
     }
 
-    sbi->sb = (struct alefs_superblock *)bh->b_data;
+    sbi->sb = (struct aleqfs_superblock *)bh->b_data;
     sbi->sb_bh = bh;
 
-    sbi->block_size        = ALEFS_BLOCK_SIZE;
+    sbi->block_size        = ALEQFS_BLOCK_SIZE;
     sbi->total_blocks      = sbi->sb->total_blocks;
     sbi->inode_count       = sbi->sb->inode_count;
     sbi->inode_table_start = sbi->sb->inode_table_start;
     sbi->data_start        = sbi->sb->data_start;
 
-    sb->s_magic          = ALEFS_MAGIC;
-    sb->s_op             = &alefs_super_ops;
+    sb->s_magic          = ALEQFS_MAGIC;
+    sb->s_op             = &aleqfs_super_ops;
     sb->s_maxbytes       = MAX_LFS_FILESIZE;
 
-    root_inode = iget_locked(sb, ALEFS_ROOT_INO);
+    root_inode = iget_locked(sb, ALEQFS_ROOT_INO);
     if (!root_inode) {
         ret = -ENOMEM;
         goto fail;
     }
 
-    alefs_read_inode(root_inode);
-    root_inode->i_op  = &alefs_dir_inode_ops;
-    root_inode->i_fop = &alefs_dir_ops;
+    aleqfs_read_inode(root_inode);
+    root_inode->i_op  = &aleqfs_dir_inode_ops;
+    root_inode->i_fop = &aleqfs_dir_ops;
     unlock_new_inode(root_inode);
 
     sb->s_root = d_make_root(root_inode);
@@ -1053,42 +1109,42 @@ fail:
     return ret;
 }
 
-static struct dentry *alefs_mount(struct file_system_type *fs_type,
+static struct dentry *aleqfs_mount(struct file_system_type *fs_type,
                                    int flags, const char *dev_name,
                                    void *data)
 {
-    return mount_bdev(fs_type, flags, dev_name, data, alefs_fill_super);
+    return mount_bdev(fs_type, flags, dev_name, data, aleqfs_fill_super);
 }
 
-static struct file_system_type alefs_fs_type = {
+static struct file_system_type aleqfs_fs_type = {
     .owner   = THIS_MODULE,
-    .name    = "alefs",
-    .mount   = alefs_mount,
+    .name    = ALEQFS_MOD_NAME,
+    .mount   = aleqfs_mount,
     .kill_sb = kill_block_super,
     .fs_flags = FS_REQUIRES_DEV,
 };
 
-static int __init alefs_init(void)
+static int __init aleqfs_init(void)
 {
-    int ret = register_filesystem(&alefs_fs_type);
+    int ret = register_filesystem(&aleqfs_fs_type);
     if (ret)
-        pr_err("alefs: failed to register (%d)\n", ret);
+        pr_err("aleqfs: failed to register (%d)\n", ret);
     else
-        pr_info("alefs: module loaded v%s\n", ALEFS_MOD_VER);
+        pr_info("aleqfs: module loaded v%s\n", ALEQFS_MOD_VER);
     return ret;
 }
 
-static void __exit alefs_exit(void)
+static void __exit aleqfs_exit(void)
 {
-    unregister_filesystem(&alefs_fs_type);
-    pr_info("alefs: module unloaded\n");
+    unregister_filesystem(&aleqfs_fs_type);
+    pr_info("aleqfs: module unloaded\n");
 }
 
-module_init(alefs_init);
-module_exit(alefs_exit);
+module_init(aleqfs_init);
+module_exit(aleqfs_exit);
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("AleFS Contributors");
-MODULE_DESCRIPTION(ALEFS_MOD_DESC);
-MODULE_VERSION(ALEFS_MOD_VER);
-MODULE_ALIAS("alefs");
+MODULE_AUTHOR("AleQFS Contributors");
+MODULE_DESCRIPTION(ALEQFS_MOD_DESC);
+MODULE_VERSION(ALEQFS_MOD_VER);
+MODULE_ALIAS("aleqfs");

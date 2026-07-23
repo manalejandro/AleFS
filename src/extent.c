@@ -1,52 +1,22 @@
-#include "alefs.h"
+#include "aleqfs.h"
 #include <string.h>
-#include <stdlib.h>
 #include <errno.h>
 
-int alefs_extent_alloc(struct alefs_dev *dev, uint64_t count, struct alefs_extent *ext)
+static int find_extent(const struct aleqfs_inode *inode, uint64_t file_block,
+                       uint64_t *phys_block)
 {
-    uint64_t start;
-    int ret = alefs_bitmap_alloc(dev, &start);
-    if (ret) return ret;
-
-    ext->start = start;
-    ext->count = 1;
-
-    for (uint64_t i = 1; i < count; i++) {
-        uint64_t b;
-        ret = alefs_bitmap_alloc(dev, &b);
-        if (ret) break;
-        ext->count++;
-    }
-
-    return 0;
-}
-
-int alefs_extent_free(struct alefs_dev *dev, const struct alefs_extent *ext)
-{
-    for (uint64_t i = 0; i < ext->count; i++) {
-        int ret = alefs_bitmap_free(dev, ext->start + i);
-        if (ret) return ret;
-    }
-    return 0;
-}
-
-static int find_extent(const struct alefs_inode *inode, uint64_t block_offset,
-                       uint64_t *ext_idx, uint64_t *ext_block_offset)
-{
-    uint64_t accumulated = 0;
+    uint64_t accum = 0;
     for (uint32_t i = 0; i < inode->extent_count; i++) {
-        if (block_offset < accumulated + inode->extents[i].count) {
-            *ext_idx = i;
-            *ext_block_offset = block_offset - accumulated;
-            return 0;
+        if (file_block < accum + inode->extents[i].count) {
+            *phys_block = inode->extents[i].start + (file_block - accum);
+            return (int)i;
         }
-        accumulated += inode->extents[i].count;
+        accum += inode->extents[i].count;
     }
-    return -ENOENT;
+    return -1;
 }
 
-static uint64_t total_extent_blocks(const struct alefs_inode *inode)
+static uint64_t total_extent_blocks(const struct aleqfs_inode *inode)
 {
     uint64_t total = 0;
     for (uint32_t i = 0; i < inode->extent_count; i++)
@@ -54,71 +24,154 @@ static uint64_t total_extent_blocks(const struct alefs_inode *inode)
     return total;
 }
 
-int alefs_extent_read(struct alefs_dev *dev, const struct alefs_inode *inode,
-                      uint64_t offset, void *buf, uint64_t size)
+int aleqfs_extent_alloc(struct aleqfs_dev *dev, uint64_t count,
+                        struct aleqfs_extent *ext)
 {
-    uint64_t pos = 0;
-    uint8_t *dst = buf;
-
-    while (size > 0) {
-        uint64_t block_offset = offset / ALEFS_BLOCK_SIZE;
-        uint64_t byte_offset = offset % ALEFS_BLOCK_SIZE;
-        uint64_t ext_idx, ext_block_off;
-
-        if (find_extent(inode, block_offset, &ext_idx, &ext_block_off) != 0)
-            break;
-
-        uint64_t dev_block = inode->extents[ext_idx].start + ext_block_off;
-        uint64_t to_copy = ALEFS_BLOCK_SIZE - byte_offset;
-        if (to_copy > size) to_copy = size;
-
-        uint8_t block_buf[ALEFS_BLOCK_SIZE];
-        int ret = alefs_dev_read(dev, dev_block, block_buf);
-        if (ret) return ret;
-
-        memcpy(dst, block_buf + byte_offset, to_copy);
-        dst += to_copy;
-        offset += to_copy;
-        pos += to_copy;
-        size -= to_copy;
+    for (uint64_t blk = dev->sb.data_start; blk <= dev->sb.total_blocks - count;) {
+        bool found = true;
+        for (uint64_t i = 0; i < count; i++) {
+            if (aleqfs_bitmap_get(dev, blk + i)) {
+                found = false;
+                blk += i + 1;
+                break;
+            }
+        }
+        if (found) {
+            ext->start = blk;
+            ext->count = count;
+            for (uint64_t i = 0; i < count; i++)
+                aleqfs_bitmark_set(dev, blk + i);
+            dev->sb.free_blocks -= count;
+            dev->dirty = true;
+            return 0;
+        }
     }
-
-    return (int)pos;
+    return -ENOSPC;
 }
 
-int alefs_extent_write(struct alefs_dev *dev, struct alefs_inode *inode,
-                       uint64_t offset, const void *buf, uint64_t size)
+int aleqfs_extent_free(struct aleqfs_dev *dev, const struct aleqfs_extent *ext)
 {
-    const uint8_t *src = buf;
+    for (uint64_t i = 0; i < ext->count; i++) {
+        int ret = aleqfs_bitmap_free(dev, ext->start + i);
+        if (ret < 0)
+            return ret;
+    }
+    return 0;
+}
+
+int aleqfs_extent_read(struct aleqfs_dev *dev, const struct aleqfs_inode *inode,
+                       uint64_t offset, void *buf, uint64_t size)
+{
+    if (offset >= inode->size)
+        return 0;
+    if (offset + size > inode->size)
+        size = inode->size - offset;
+
+    uint8_t *ptr = (uint8_t *)buf;
     uint64_t remaining = size;
 
     while (remaining > 0) {
-        uint64_t block_offset = offset / ALEFS_BLOCK_SIZE;
-        uint64_t byte_offset = offset % ALEFS_BLOCK_SIZE;
+        uint64_t file_block = offset / ALEQFS_BLOCK_SIZE;
+        uint64_t block_off = offset % ALEQFS_BLOCK_SIZE;
 
-        uint64_t ext_idx, ext_block_off;
-        if (find_extent(inode, block_offset, &ext_idx, &ext_block_off) != 0)
-            return -ENOSPC;
+        uint64_t phys_block;
+        if (find_extent(inode, file_block, &phys_block) < 0)
+            return -EIO;
 
-        uint64_t dev_block = inode->extents[ext_idx].start + ext_block_off;
-        uint64_t to_copy = ALEFS_BLOCK_SIZE - byte_offset;
-        if (to_copy > remaining) to_copy = remaining;
+        uint64_t to_read = ALEQFS_BLOCK_SIZE - block_off;
+        if (to_read > remaining)
+            to_read = remaining;
 
-        uint8_t block_buf[ALEFS_BLOCK_SIZE];
-        int ret;
+        uint8_t tmp[ALEQFS_BLOCK_SIZE];
+        int ret = aleqfs_dev_read(dev, phys_block, tmp);
+        if (ret < 0)
+            return ret;
 
-        if (byte_offset > 0 || to_copy < ALEFS_BLOCK_SIZE) {
-            ret = alefs_dev_read(dev, dev_block, block_buf);
-            if (ret) return ret;
+        memcpy(ptr, tmp + block_off, to_read);
+
+        ptr += to_read;
+        offset += to_read;
+        remaining -= to_read;
+    }
+
+    return 0;
+}
+
+int aleqfs_extent_write(struct aleqfs_dev *dev, struct aleqfs_inode *inode,
+                        uint64_t offset, const void *buf, uint64_t size)
+{
+    const uint8_t *ptr = (const uint8_t *)buf;
+    uint64_t remaining = size;
+
+    while (remaining > 0) {
+        uint64_t file_block = offset / ALEQFS_BLOCK_SIZE;
+        uint64_t block_off = offset % ALEQFS_BLOCK_SIZE;
+
+        uint64_t phys_block;
+        int idx = find_extent(inode, file_block, &phys_block);
+
+        if (idx < 0) {
+            bool allocated = false;
+
+            if (inode->extent_count > 0) {
+                struct aleqfs_extent *last =
+                    &inode->extents[inode->extent_count - 1];
+                uint64_t last_start = 0;
+                for (uint32_t i = 0; i < inode->extent_count - 1; i++)
+                    last_start += inode->extents[i].count;
+
+                if (file_block == last_start + last->count) {
+                    uint64_t next = last->start + last->count;
+                    if (!aleqfs_bitmap_get(dev, next)) {
+                        aleqfs_bitmark_set(dev, next);
+                        last->count++;
+                        inode->blocks++;
+                        dev->sb.free_blocks--;
+                        dev->dirty = true;
+                        phys_block = next;
+                        allocated = true;
+                    }
+                }
+            }
+
+            if (!allocated) {
+                if (inode->extent_count >= ALEQFS_NR_EXTENTS)
+                    return -ENOSPC;
+
+                struct aleqfs_extent new_ext;
+                int ret = aleqfs_extent_alloc(dev, 1, &new_ext);
+                if (ret < 0)
+                    return ret;
+
+                inode->extents[inode->extent_count] = new_ext;
+                inode->extent_count++;
+                inode->blocks += new_ext.count;
+                phys_block = new_ext.start;
+            }
         }
 
-        memcpy(block_buf + byte_offset, src, to_copy);
-        ret = alefs_dev_write(dev, dev_block, block_buf);
-        if (ret) return ret;
+        uint64_t to_write = ALEQFS_BLOCK_SIZE - block_off;
+        if (to_write > remaining)
+            to_write = remaining;
 
-        src += to_copy;
-        offset += to_copy;
-        remaining -= to_copy;
+        if (block_off == 0 && to_write == ALEQFS_BLOCK_SIZE) {
+            int ret = aleqfs_dev_write(dev, phys_block, ptr);
+            if (ret < 0)
+                return ret;
+        } else {
+            uint8_t tmp[ALEQFS_BLOCK_SIZE];
+            int ret = aleqfs_dev_read(dev, phys_block, tmp);
+            if (ret < 0)
+                return ret;
+            memcpy(tmp + block_off, ptr, to_write);
+            ret = aleqfs_dev_write(dev, phys_block, tmp);
+            if (ret < 0)
+                return ret;
+        }
+
+        ptr += to_write;
+        offset += to_write;
+        remaining -= to_write;
     }
 
     if (offset > inode->size)
@@ -127,61 +180,92 @@ int alefs_extent_write(struct alefs_dev *dev, struct alefs_inode *inode,
     return 0;
 }
 
-int alefs_extent_append(struct alefs_dev *dev, struct alefs_inode *inode,
-                        const void *buf, uint64_t size, uint64_t *bytes_written,
-                        uint64_t ino)
+int aleqfs_extent_append(struct aleqfs_dev *dev, struct aleqfs_inode *inode,
+                         const void *buf, uint64_t size, uint64_t *bytes_written,
+                         uint64_t ino)
 {
+    (void)ino;
+
     uint64_t offset = inode->size;
-    uint64_t orig_size = inode->size;
-    const uint8_t *src = buf;
+    const uint8_t *ptr = (const uint8_t *)buf;
     uint64_t remaining = size;
-    uint64_t block_offset = offset / ALEFS_BLOCK_SIZE;
+    uint64_t written = 0;
 
     while (remaining > 0) {
-        uint64_t ext_idx, ext_block_off;
-        if (find_extent(inode, block_offset, &ext_idx, &ext_block_off) != 0) {
-            struct alefs_extent ext;
-            int ret = alefs_extent_alloc(dev, 1, &ext);
-            if (ret) {
-                *bytes_written = offset - orig_size;
-                return ret;
+        uint64_t file_block = offset / ALEQFS_BLOCK_SIZE;
+        uint64_t block_off = offset % ALEQFS_BLOCK_SIZE;
+
+        uint64_t phys_block;
+        int idx = find_extent(inode, file_block, &phys_block);
+
+        if (idx < 0) {
+            bool allocated = false;
+
+            if (inode->extent_count > 0) {
+                struct aleqfs_extent *last =
+                    &inode->extents[inode->extent_count - 1];
+                uint64_t last_start = 0;
+                for (uint32_t i = 0; i < inode->extent_count - 1; i++)
+                    last_start += inode->extents[i].count;
+
+                if (file_block == last_start + last->count) {
+                    uint64_t next = last->start + last->count;
+                    if (!aleqfs_bitmap_get(dev, next)) {
+                        aleqfs_bitmark_set(dev, next);
+                        last->count++;
+                        inode->blocks++;
+                        dev->sb.free_blocks--;
+                        dev->dirty = true;
+                        phys_block = next;
+                        allocated = true;
+                    }
+                }
             }
 
-            if (inode->extent_count < ALEFS_NR_EXTENTS) {
-                inode->extents[inode->extent_count] = ext;
+            if (!allocated) {
+                if (inode->extent_count >= ALEQFS_NR_EXTENTS)
+                    break;
+
+                struct aleqfs_extent new_ext;
+                int ret = aleqfs_extent_alloc(dev, 1, &new_ext);
+                if (ret < 0)
+                    break;
+
+                inode->extents[inode->extent_count] = new_ext;
                 inode->extent_count++;
-            } else {
-                return -ENOSPC;
+                inode->blocks += new_ext.count;
+                phys_block = new_ext.start;
             }
-            continue;
         }
 
-        uint64_t dev_block = inode->extents[ext_idx].start + ext_block_off;
-        uint64_t byte_in_block = offset % ALEFS_BLOCK_SIZE;
-        uint64_t to_copy = ALEFS_BLOCK_SIZE - byte_in_block;
-        if (to_copy > remaining) to_copy = remaining;
+        uint64_t to_write = ALEQFS_BLOCK_SIZE - block_off;
+        if (to_write > remaining)
+            to_write = remaining;
 
-        uint8_t block_buf[ALEFS_BLOCK_SIZE];
-        int ret;
-
-        if (byte_in_block > 0) {
-            ret = alefs_dev_read(dev, dev_block, block_buf);
-            if (ret) { *bytes_written = offset - orig_size; return ret; }
+        if (block_off == 0 && to_write == ALEQFS_BLOCK_SIZE) {
+            if (aleqfs_dev_write(dev, phys_block, ptr) < 0)
+                break;
+        } else {
+            uint8_t tmp[ALEQFS_BLOCK_SIZE];
+            if (aleqfs_dev_read(dev, phys_block, tmp) < 0)
+                break;
+            memcpy(tmp + block_off, ptr, to_write);
+            if (aleqfs_dev_write(dev, phys_block, tmp) < 0)
+                break;
         }
 
-        memcpy(block_buf + byte_in_block, src, to_copy);
-        ret = alefs_dev_write(dev, dev_block, block_buf);
-        if (ret) { *bytes_written = offset - orig_size; return ret; }
-
-        src += to_copy;
-        offset += to_copy;
-        remaining -= to_copy;
-        block_offset = offset / ALEFS_BLOCK_SIZE;
+        ptr += to_write;
+        offset += to_write;
+        written += to_write;
+        remaining -= to_write;
     }
 
-    inode->size = offset;
-    inode->blocks = total_extent_blocks(inode) * 8;
+    inode->size += written;
+    inode->blocks = total_extent_blocks(inode);
     inode->mtime = time(NULL);
-    *bytes_written = size;
-    return alefs_inode_write(dev, ino, inode);
+    *bytes_written = written;
+
+    if (written > 0)
+        return aleqfs_inode_write(dev, ino, inode);
+    return 0;
 }

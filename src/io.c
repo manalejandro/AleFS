@@ -1,26 +1,47 @@
-#include "alefs.h"
+#include "aleqfs.h"
 #include <fcntl.h>
 #include <unistd.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <sys/stat.h>
 #include <string.h>
 #include <errno.h>
 
-int alefs_dev_open(struct alefs_dev *dev, const char *path, int flags)
+int aleqfs_dev_open(struct aleqfs_dev *dev, const char *path, int flags)
 {
+    struct stat st;
     memset(dev, 0, sizeof(*dev));
-    dev->fd = open(path, flags);
-    if (dev->fd < 0)
-        return -errno;
+
+    if (stat(path, &st) == 0 && S_ISBLK(st.st_mode)) {
+        dev->fd = open(path, O_RDWR);
+        if (dev->fd < 0)
+            return -errno;
+        off_t size = lseek(dev->fd, 0, SEEK_END);
+        if (size < 0) {
+            close(dev->fd);
+            return -errno;
+        }
+        dev->num_blocks = (uint64_t)size / ALEQFS_BLOCK_SIZE;
+    } else {
+        dev->fd = open(path, flags, 0644);
+        if (dev->fd < 0)
+            return -errno;
+        off_t size = lseek(dev->fd, 0, SEEK_END);
+        if (size > 0)
+            dev->num_blocks = (uint64_t)size / ALEQFS_BLOCK_SIZE;
+    }
+
     dev->path = strdup(path);
-    dev->block_size = ALEFS_BLOCK_SIZE;
+    dev->block_size = ALEQFS_BLOCK_SIZE;
+    if (!dev->path) {
+        close(dev->fd);
+        return -ENOMEM;
+    }
     return 0;
 }
 
-int alefs_dev_close(struct alefs_dev *dev)
+int aleqfs_dev_close(struct aleqfs_dev *dev)
 {
     if (dev->dirty)
-        alefs_super_sync(dev);
+        aleqfs_super_sync(dev);
     if (dev->fd >= 0)
         close(dev->fd);
     free(dev->path);
@@ -28,7 +49,7 @@ int alefs_dev_close(struct alefs_dev *dev)
     return 0;
 }
 
-int alefs_dev_read(struct alefs_dev *dev, uint64_t block, void *buf)
+int aleqfs_dev_read(struct aleqfs_dev *dev, uint64_t block, void *buf)
 {
     off_t offset = (off_t)block * (off_t)dev->block_size;
     ssize_t n = pread(dev->fd, buf, dev->block_size, offset);
@@ -37,7 +58,7 @@ int alefs_dev_read(struct alefs_dev *dev, uint64_t block, void *buf)
     return 0;
 }
 
-int alefs_dev_write(struct alefs_dev *dev, uint64_t block, const void *buf)
+int aleqfs_dev_write(struct aleqfs_dev *dev, uint64_t block, const void *buf)
 {
     off_t offset = (off_t)block * (off_t)dev->block_size;
     ssize_t n = pwrite(dev->fd, buf, dev->block_size, offset);
@@ -47,26 +68,21 @@ int alefs_dev_write(struct alefs_dev *dev, uint64_t block, const void *buf)
     return 0;
 }
 
-int alefs_dev_sync(struct alefs_dev *dev)
+int aleqfs_dev_sync(struct aleqfs_dev *dev)
 {
     if (dev->dirty) {
-        int ret = alefs_super_sync(dev);
+        int ret = aleqfs_super_sync(dev);
         if (ret) return ret;
-        dev->dirty = false;
     }
     return fsync(dev->fd);
 }
 
-int alefs_dev_create(const char *path, uint64_t size_mb)
+int aleqfs_dev_create(const char *path, uint64_t size_mb)
 {
     struct stat st;
-    if (stat(path, &st) == 0 && S_ISBLK(st.st_mode)) {
-        int fd = open(path, O_RDWR);
-        if (fd < 0)
-            return -errno;
-        close(fd);
+    if (stat(path, &st) == 0 && S_ISBLK(st.st_mode))
         return 0;
-    }
+
     uint64_t size = size_mb * 1024ULL * 1024ULL;
     int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
     if (fd < 0)

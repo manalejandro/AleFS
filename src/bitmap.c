@@ -1,135 +1,179 @@
-#include "alefs.h"
+#include "aleqfs.h"
 #include <string.h>
 #include <errno.h>
 
-static int bitmap_load(struct alefs_dev *dev, uint8_t *bitmap)
+#define BITS_PER_BLK (ALEQFS_BLOCK_SIZE * 8)
+
+static uint8_t bitmap_cache[ALEQFS_BITMAP_BLOCKS][ALEQFS_BLOCK_SIZE];
+static bool bitmap_dirty[ALEQFS_BITMAP_BLOCKS];
+static bool bitmap_loaded[ALEQFS_BITMAP_BLOCKS];
+
+static int bitmap_load(struct aleqfs_dev *dev, uint64_t blk_idx)
 {
-    uint64_t start = dev->sb.bitmap_start;
-    for (uint64_t i = 0; i < ALEFS_BITMAP_BLOCKS; i++) {
-        int ret = alefs_dev_read(dev, start + i, bitmap + i * ALEFS_BLOCK_SIZE);
-        if (ret) return ret;
-    }
+    if (blk_idx >= ALEQFS_BITMAP_BLOCKS)
+        return -EINVAL;
+    if (bitmap_loaded[blk_idx])
+        return 0;
+    int ret = aleqfs_dev_read(dev, dev->sb.bitmap_start + blk_idx,
+                              bitmap_cache[blk_idx]);
+    if (ret < 0)
+        return ret;
+    bitmap_loaded[blk_idx] = true;
+    bitmap_dirty[blk_idx] = false;
     return 0;
 }
 
-static int bitmap_save(struct alefs_dev *dev, const uint8_t *bitmap)
+static int bitmap_save(struct aleqfs_dev *dev, uint64_t blk_idx)
 {
-    uint64_t start = dev->sb.bitmap_start;
-    for (uint64_t i = 0; i < ALEFS_BITMAP_BLOCKS; i++) {
-        int ret = alefs_dev_write(dev, start + i, bitmap + i * ALEFS_BLOCK_SIZE);
-        if (ret) return ret;
-    }
+    if (blk_idx >= ALEQFS_BITMAP_BLOCKS)
+        return -EINVAL;
+    if (!bitmap_dirty[blk_idx])
+        return 0;
+    int ret = aleqfs_dev_write(dev, dev->sb.bitmap_start + blk_idx,
+                               bitmap_cache[blk_idx]);
+    if (ret < 0)
+        return ret;
+    bitmap_dirty[blk_idx] = false;
     return 0;
 }
 
-int alefs_bitmap_init(struct alefs_dev *dev)
+static int bitmap_load_all(struct aleqfs_dev *dev)
 {
-    uint64_t bitmap_bytes = ALEFS_BITMAP_BLOCKS * ALEFS_BLOCK_SIZE;
-    uint8_t *bitmap = calloc(1, bitmap_bytes);
-    if (!bitmap) return -ENOMEM;
-
-    uint64_t start = dev->sb.bitmap_start;
-    for (uint64_t i = 0; i < start; i++) {
-        uint64_t byte = i / 8;
-        uint64_t bit  = i % 8;
-        if (byte < bitmap_bytes)
-            bitmap[byte] |= (1 << bit);
-    }
-
-    for (uint64_t i = start + ALEFS_BITMAP_BLOCKS; i < dev->num_blocks; i++) {
-        uint64_t byte = i / 8;
-        uint64_t bit  = i % 8;
-        if (byte < bitmap_bytes)
-            bitmap[byte] &= ~(1 << bit);
-    }
-
-    int ret = bitmap_save(dev, bitmap);
-    free(bitmap);
-    return ret;
-}
-
-int alefs_bitmap_alloc(struct alefs_dev *dev, uint64_t *block)
-{
-    uint64_t bitmap_bytes = ALEFS_BITMAP_BLOCKS * ALEFS_BLOCK_SIZE;
-    uint8_t *bitmap = calloc(1, bitmap_bytes);
-    if (!bitmap) return -ENOMEM;
-
-    int ret = bitmap_load(dev, bitmap);
-    if (ret) { free(bitmap); return ret; }
-
-    for (uint64_t i = dev->sb.data_start; i < dev->num_blocks; i++) {
-        uint64_t byte = i / 8;
-        uint64_t bit  = i % 8;
-        if (!(bitmap[byte] & (1 << bit))) {
-            bitmap[byte] |= (1 << bit);
-            *block = i;
-            dev->sb.free_blocks--;
-            ret = bitmap_save(dev, bitmap);
-            free(bitmap);
+    for (uint64_t i = 0; i < ALEQFS_BITMAP_BLOCKS; i++) {
+        int ret = bitmap_load(dev, i);
+        if (ret < 0)
             return ret;
+    }
+    return 0;
+}
+
+static int bitmap_save_all(struct aleqfs_dev *dev)
+{
+    for (uint64_t i = 0; i < ALEQFS_BITMAP_BLOCKS; i++) {
+        int ret = bitmap_save(dev, i);
+        if (ret < 0)
+            return ret;
+    }
+    return 0;
+}
+
+int aleqfs_bitmap_init(struct aleqfs_dev *dev)
+{
+    memset(bitmap_loaded, 0, sizeof(bitmap_loaded));
+    memset(bitmap_dirty, 0, sizeof(bitmap_dirty));
+    for (uint64_t i = 0; i < ALEQFS_BITMAP_BLOCKS; i++) {
+        memset(bitmap_cache[i], 0, ALEQFS_BLOCK_SIZE);
+        bitmap_loaded[i] = true;
+        bitmap_dirty[i] = true;
+    }
+
+    uint64_t data_start = dev->sb.data_start;
+    for (uint64_t blk = 0; blk < data_start; blk++) {
+        uint64_t bb = blk / BITS_PER_BLK;
+        uint64_t off = blk % BITS_PER_BLK;
+        uint64_t byte_off = off / 8;
+        uint8_t bit = 1 << (off % 8);
+        bitmap_cache[bb][byte_off] |= bit;
+    }
+
+    dev->sb.free_blocks = dev->sb.total_blocks - data_start;
+    dev->dirty = true;
+
+    return bitmap_save_all(dev);
+}
+
+int aleqfs_bitmap_alloc(struct aleqfs_dev *dev, uint64_t *block)
+{
+    int ret = bitmap_load_all(dev);
+    if (ret < 0)
+        return ret;
+
+    for (uint64_t blk = dev->sb.data_start; blk < dev->sb.total_blocks; blk++) {
+        uint64_t bb = blk / BITS_PER_BLK;
+        if (bb >= ALEQFS_BITMAP_BLOCKS)
+            break;
+        uint64_t off = blk % BITS_PER_BLK;
+        uint64_t byte_off = off / 8;
+        uint8_t bit = 1 << (off % 8);
+
+        if (!(bitmap_cache[bb][byte_off] & bit)) {
+            bitmap_cache[bb][byte_off] |= bit;
+            bitmap_dirty[bb] = true;
+            bitmap_save(dev, bb);
+            dev->sb.free_blocks--;
+            dev->dirty = true;
+            *block = blk;
+            return 0;
         }
     }
 
-    free(bitmap);
     return -ENOSPC;
 }
 
-int alefs_bitmap_free(struct alefs_dev *dev, uint64_t block)
+int aleqfs_bitmap_free(struct aleqfs_dev *dev, uint64_t block)
 {
-    uint64_t bitmap_bytes = ALEFS_BITMAP_BLOCKS * ALEFS_BLOCK_SIZE;
-    uint8_t *bitmap = calloc(1, bitmap_bytes);
-    if (!bitmap) return -ENOMEM;
+    if (block >= dev->sb.total_blocks)
+        return 0;
 
-    int ret = bitmap_load(dev, bitmap);
-    if (ret) { free(bitmap); return ret; }
+    uint64_t bb = block / BITS_PER_BLK;
+    if (bb >= ALEQFS_BITMAP_BLOCKS)
+        return 0;
 
-    uint64_t byte = block / 8;
-    uint64_t bit  = block % 8;
-    if (byte < bitmap_bytes) {
-        bitmap[byte] &= ~(1 << bit);
-        dev->sb.free_blocks++;
-    }
+    int ret = bitmap_load(dev, bb);
+    if (ret < 0)
+        return ret;
 
-    ret = bitmap_save(dev, bitmap);
-    free(bitmap);
-    return ret;
+    uint64_t off = block % BITS_PER_BLK;
+    uint64_t byte_off = off / 8;
+    uint8_t bit = 1 << (off % 8);
+
+    bitmap_cache[bb][byte_off] &= ~bit;
+    bitmap_dirty[bb] = true;
+    bitmap_save(dev, bb);
+    dev->sb.free_blocks++;
+    dev->dirty = true;
+
+    return 0;
 }
 
-int alefs_bitmark_set(struct alefs_dev *dev, uint64_t block)
+void aleqfs_bitmark_set(struct aleqfs_dev *dev, uint64_t block)
 {
-    uint64_t bitmap_bytes = ALEFS_BITMAP_BLOCKS * ALEFS_BLOCK_SIZE;
-    uint8_t *bitmap = calloc(1, bitmap_bytes);
-    if (!bitmap) return -ENOMEM;
+    if (block >= dev->sb.total_blocks)
+        return;
 
-    int ret = bitmap_load(dev, bitmap);
-    if (ret) { free(bitmap); return ret; }
+    uint64_t bb = block / BITS_PER_BLK;
+    if (bb >= ALEQFS_BITMAP_BLOCKS)
+        return;
 
-    uint64_t byte = block / 8;
-    uint64_t bit  = block % 8;
-    if (byte < bitmap_bytes)
-        bitmap[byte] |= (1 << bit);
-
-    ret = bitmap_save(dev, bitmap);
-    free(bitmap);
-    return ret;
-}
-
-bool alefs_bitmap_get(struct alefs_dev *dev, uint64_t block)
-{
-    uint64_t bitmap_bytes = ALEFS_BITMAP_BLOCKS * ALEFS_BLOCK_SIZE;
-    uint8_t *bitmap = calloc(1, bitmap_bytes);
-    if (!bitmap) return false;
-
-    if (bitmap_load(dev, bitmap)) {
-        free(bitmap);
-        return false;
+    if (!bitmap_loaded[bb]) {
+        if (bitmap_load_all(dev) < 0)
+            return;
     }
 
-    uint64_t byte = block / 8;
-    uint64_t bit  = block % 8;
-    bool set = false;
-    if (byte < bitmap_bytes)
-        set = !!(bitmap[byte] & (1 << bit));
-    free(bitmap);
-    return set;
+    uint64_t off = block % BITS_PER_BLK;
+    uint64_t byte_off = off / 8;
+    uint8_t bit = 1 << (off % 8);
+
+    bitmap_cache[bb][byte_off] |= bit;
+    bitmap_dirty[bb] = true;
+    bitmap_save(dev, bb);
+}
+
+bool aleqfs_bitmap_get(struct aleqfs_dev *dev, uint64_t block)
+{
+    if (block >= dev->sb.total_blocks)
+        return true;
+
+    uint64_t bb = block / BITS_PER_BLK;
+    if (bb >= ALEQFS_BITMAP_BLOCKS)
+        return true;
+
+    if (bitmap_load_all(dev) < 0)
+        return true;
+
+    uint64_t off = block % BITS_PER_BLK;
+    uint64_t byte_off = off / 8;
+    uint8_t bit = 1 << (off % 8);
+
+    return (bitmap_cache[bb][byte_off] & bit) != 0;
 }

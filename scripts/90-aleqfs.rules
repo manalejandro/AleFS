@@ -1,0 +1,5 @@
+# AleQFS quantum filesystem auto-mount rule
+ACTION=="add", KERNEL=="sd*[!0-9]|vd*[!0-9]", \
+    IMPORT{program}="/usr/sbin/mount.aleqfs --probe"
+ENV{ID_FS_TYPE}=="aleqfs", \
+    RUN{program}+="/usr/sbin/mount.aleqfs $env{DEVNAME}"

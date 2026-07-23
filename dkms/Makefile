@@ -1,2 +1,2 @@
-obj-m := alefs_ko.o
+obj-m := aleqfs_ko.o
 ccflags-y := -I$(src)
