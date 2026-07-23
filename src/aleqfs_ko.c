@@ -456,8 +456,6 @@ static ssize_t aleqfs_read(struct file *file, char __user *buf,
     struct aleqfs_sb_info *sbi = ALEQFS_SB(sb);
     loff_t pos = *ppos;
     ssize_t ret = 0;
-    uint64_t grover_hash = 0;
-    bool do_decoherence = false;
 
     if (pos < 0)
         return -EINVAL;
@@ -465,17 +463,6 @@ static ssize_t aleqfs_read(struct file *file, char __user *buf,
         return 0;
     if (len > inode->i_size - pos)
         len = inode->i_size - pos;
-
-    struct buffer_head *inode_bh;
-    unsigned long io;
-    struct aleqfs_inode *ei;
-
-    if (aleqfs_read_inode_block(sb, inode->i_ino, &inode_bh, &io))
-        return -EIO;
-    ei = (struct aleqfs_inode *)(inode_bh->b_data + io);
-    if (ei->grover_hash != 0)
-        do_decoherence = true;
-    brelse(inode_bh);
 
     while (len > 0) {
         uint64_t block_off = pos / sbi->block_size;
@@ -485,9 +472,11 @@ static ssize_t aleqfs_read(struct file *file, char __user *buf,
         uint64_t extent_off = 0;
         unsigned int i;
 
+        struct buffer_head *inode_bh;
+        unsigned long io;
         if (aleqfs_read_inode_block(sb, inode->i_ino, &inode_bh, &io))
             return ret ? ret : -EIO;
-        ei = (struct aleqfs_inode *)(inode_bh->b_data + io);
+        struct aleqfs_inode *ei = (struct aleqfs_inode *)(inode_bh->b_data + io);
 
         dev_block = 0;
         for (i = 0; i < ei->extent_count; i++) {
@@ -509,10 +498,6 @@ static ssize_t aleqfs_read(struct file *file, char __user *buf,
         size_t to_copy = sbi->block_size - byte_off;
         if (to_copy > len) to_copy = len;
 
-        if (do_decoherence)
-            grover_hash ^= aleqfs_grover_hash_compute(bh->b_data + byte_off,
-                                                      to_copy, 0);
-
         if (copy_to_user(buf, bh->b_data + byte_off, to_copy)) {
             brelse(bh);
             return ret ? ret : -EFAULT;
@@ -526,22 +511,6 @@ static ssize_t aleqfs_read(struct file *file, char __user *buf,
     }
 
     *ppos = pos;
-
-    if (do_decoherence) {
-        struct buffer_head *ibh;
-        unsigned long ioff;
-        if (!aleqfs_read_inode_block(sb, inode->i_ino, &ibh, &ioff)) {
-            struct aleqfs_inode *ei2 = (struct aleqfs_inode *)(ibh->b_data + ioff);
-            if (grover_hash != ei2->grover_hash)
-                pr_warn("aleqfs: quantum decoherence detected on inode %llu "
-                        "(observed hash 0x%llx != stored 0x%llx)\n",
-                        (unsigned long long)inode->i_ino,
-                        (unsigned long long)grover_hash,
-                        (unsigned long long)ei2->grover_hash);
-            brelse(ibh);
-        }
-    }
-
     return ret;
 }
 
