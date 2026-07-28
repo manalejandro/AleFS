@@ -770,8 +770,12 @@ static int cmd_observe(int argc, char **argv)
     ret = aleqfs_inode_read(&dev, ino, &inode);
     if (ret) { fprintf(stderr, "read inode failed: %s\n", strerror(-ret)); aleqfs_dev_close(&dev); return 1; }
 
-    ret = aleqfs_quantum_collapse(&inode.amplitude.real, &inode.amplitude.imag);
+    int16_t amp_real = inode.amplitude.real;
+    int16_t amp_imag = inode.amplitude.imag;
+    ret = aleqfs_quantum_collapse(&amp_real, &amp_imag);
     if (ret < 0) { fprintf(stderr, "quantum collapse failed\n"); aleqfs_dev_close(&dev); return 1; }
+    inode.amplitude.real = amp_real;
+    inode.amplitude.imag = amp_imag;
 
     inode.observe_count++;
     ret = aleqfs_inode_write(&dev, ino, &inode);
