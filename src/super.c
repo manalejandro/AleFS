@@ -88,6 +88,11 @@ int aleqfs_super_load(struct aleqfs_dev *dev)
         return -EINVAL;
     dev->num_blocks = dev->sb.total_blocks;
     dev->block_size = dev->sb.block_size;
+
+    int recovered = aleqfs_journal_recover(dev);
+    if (recovered < 0)
+        return recovered;
+
     return 0;
 }
 

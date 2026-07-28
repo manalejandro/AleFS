@@ -68,6 +68,11 @@ int aleqfs_dev_write(struct aleqfs_dev *dev, uint64_t block, const void *buf)
     return 0;
 }
 
+int aleqfs_dev_flush(struct aleqfs_dev *dev)
+{
+    return fsync(dev->fd);
+}
+
 int aleqfs_dev_sync(struct aleqfs_dev *dev)
 {
     if (dev->dirty) {

@@ -192,6 +192,7 @@ int  aleqfs_dev_open(struct aleqfs_dev *dev, const char *path, int flags);
 int  aleqfs_dev_close(struct aleqfs_dev *dev);
 int  aleqfs_dev_read(struct aleqfs_dev *dev, uint64_t block, void *buf);
 int  aleqfs_dev_write(struct aleqfs_dev *dev, uint64_t block, const void *buf);
+int  aleqfs_dev_flush(struct aleqfs_dev *dev);
 int  aleqfs_dev_sync(struct aleqfs_dev *dev);
 int  aleqfs_dev_create(const char *path, uint64_t size_mb);
 
@@ -273,5 +274,12 @@ int    aleqfs_quantum_collapse(int16_t *real, int16_t *imag);
 int    aleqfs_quantum_entangle_state(struct aleqfs_dev *dev, uint64_t ino,
                                      struct aleqfs_inode *inode);
 int    aleqfs_quantum_temperature(struct aleqfs_dev *dev);
+
+// journal.c
+int aleqfs_journal_recover(struct aleqfs_dev *dev);
+int aleqfs_journal_record(struct aleqfs_dev *dev, uint64_t ino,
+                           uint64_t block, uint64_t count);
+int aleqfs_journal_clear(struct aleqfs_dev *dev, uint64_t ino,
+                          uint64_t block, uint64_t count);
 
 #endif

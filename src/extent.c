@@ -184,12 +184,13 @@ int aleqfs_extent_append(struct aleqfs_dev *dev, struct aleqfs_inode *inode,
                          const void *buf, uint64_t size, uint64_t *bytes_written,
                          uint64_t ino)
 {
-    (void)ino;
-
     uint64_t offset = inode->size;
     const uint8_t *ptr = (const uint8_t *)buf;
     uint64_t remaining = size;
     uint64_t written = 0;
+
+    struct { uint64_t block; uint64_t count; } jents[ALEQFS_NR_EXTENTS];
+    int jcount = 0;
 
     while (remaining > 0) {
         uint64_t file_block = offset / ALEQFS_BLOCK_SIZE;
@@ -218,6 +219,12 @@ int aleqfs_extent_append(struct aleqfs_dev *dev, struct aleqfs_inode *inode,
                         dev->dirty = true;
                         phys_block = next;
                         allocated = true;
+                        if (jcount < ALEQFS_NR_EXTENTS) {
+                            jents[jcount].block = next;
+                            jents[jcount].count = 1;
+                            aleqfs_journal_record(dev, ino, next, 1);
+                            jcount++;
+                        }
                     }
                 }
             }
@@ -235,6 +242,13 @@ int aleqfs_extent_append(struct aleqfs_dev *dev, struct aleqfs_inode *inode,
                 inode->extent_count++;
                 inode->blocks += new_ext.count;
                 phys_block = new_ext.start;
+                if (jcount < ALEQFS_NR_EXTENTS) {
+                    jents[jcount].block = new_ext.start;
+                    jents[jcount].count = new_ext.count;
+                    aleqfs_journal_record(dev, ino, new_ext.start,
+                                           new_ext.count);
+                    jcount++;
+                }
             }
         }
 
@@ -265,7 +279,12 @@ int aleqfs_extent_append(struct aleqfs_dev *dev, struct aleqfs_inode *inode,
     inode->mtime = time(NULL);
     *bytes_written = written;
 
-    if (written > 0)
-        return aleqfs_inode_write(dev, ino, inode);
+    if (written > 0) {
+        int ret = aleqfs_inode_write(dev, ino, inode);
+        if (ret < 0)
+            return ret;
+        for (int i = 0; i < jcount; i++)
+            aleqfs_journal_clear(dev, ino, jents[i].block, jents[i].count);
+    }
     return 0;
 }

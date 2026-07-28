@@ -34,7 +34,7 @@ VERSION  := $(patsubst v%,%,$(shell git describe --tags 2>/dev/null || echo "2.0
 KMOD_SRC := $(SRCDIR)/aleqfs_ko.c
 
 SRCS := $(filter-out $(KMOD_SRC) $(SRCDIR)/alefs_ko.c $(SRCDIR)/alefs.h $(SRCDIR)/alefs_layout.h,$(wildcard $(SRCDIR)/*.c) $(wildcard $(SRCDIR)/*.h))
-SRCS := $(filter-out $(SRCDIR)/btree.c $(SRCDIR)/journal.c,$(SRCS))
+SRCS := $(filter-out $(SRCDIR)/btree.c,$(SRCS))
 SRCS := $(filter-out $(SRCDIR)/compression.c $(SRCDIR)/encryption.c $(SRCDIR)/dedup.c,$(SRCS))
 SRCS := $(filter-out $(SRCDIR)/erasure.c $(SRCDIR)/tiering.c $(SRCDIR)/gc.c,$(SRCS))
 SRCS := $(filter-out $(SRCDIR)/prefetch.c $(SRCDIR)/versioning.c,$(SRCS))
